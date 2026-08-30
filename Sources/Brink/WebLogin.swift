@@ -1,38 +1,67 @@
 import AppKit
 import WebKit
 
-/// Presents a small in-app WKWebView so the user can sign in to ollama.com
-/// (no official API key covers Cloud usage/quota, see `OllamaProvider`).
-/// The WKWebView uses its own persistent data store, separate from — and
-/// never touching — the user's system Chrome/Safari cookies. The captured
-/// ollama.com session cookie is additionally written to disk, scoped to that
-/// one domain, for `OllamaProvider` to use outside the WebView.
-final class OllamaLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
-    static let shared = OllamaLogin()
+/// Presents a small in-app WKWebView so the user can sign in to a provider
+/// that has no API key / OAuth token flow Brink can read from disk (see
+/// `OllamaProvider`, `KenariProvider`). One instance per service — each gets
+/// its own captured session cookie, scoped to that service's domain, written
+/// to `~/Library/Application Support/Brink/<id>-cookie.json`.
+///
+/// The WKWebView uses Brink's own persistent data store, separate from — and
+/// never touching — the user's system Chrome/Safari cookies. There's no
+/// supported way to borrow another browser's live session without reading
+/// its cookie store wholesale, which is a much bigger permission than this
+/// needs.
+final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
+    let id: String
+    let displayName: String
+    let loginURL: URL
+    /// Substring identifying the service's own domain, e.g. "ollama.com".
+    let host: String
+    /// Substrings that mean "still on a login/sign-in page or host" — checked
+    /// against both the host and the path, since some providers host the
+    /// actual form on a subdomain (e.g. `signin.ollama.com`) rather than a
+    /// `/login`-ish path on the main domain.
+    let signinHints: [String]
+    /// Confirms a cookie captured mid-flow is an actual signed-in session
+    /// before closing the window — a redirect landing back on the service's
+    /// domain mid-OAuth can carry only anonymous/tracking cookies, and
+    /// closing on that would strand the user mid-login.
+    let verify: (String) async -> Bool
+
+    init(id: String, displayName: String, loginURL: URL, host: String,
+         signinHints: [String], verify: @escaping (String) async -> Bool) {
+        self.id = id
+        self.displayName = displayName
+        self.loginURL = loginURL
+        self.host = host
+        self.signinHints = signinHints
+        self.verify = verify
+    }
 
     private var window: NSWindow?
     private var webView: WKWebView?
     private var onComplete: (() -> Void)?
     private var isVerifying = false
 
-    nonisolated private static var cookieFileURL: URL {
+    nonisolated private var cookieFileURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Brink", isDirectory: true)
-            .appendingPathComponent("ollama-cookie.json")
+            .appendingPathComponent("\(id)-cookie.json")
     }
 
-    nonisolated static func loadCookie() -> String? {
+    nonisolated func loadCookie() -> String? {
         guard let data = try? Data(contentsOf: cookieFileURL),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let cookie = obj["cookie"] as? String, !cookie.isEmpty else { return nil }
         return cookie
     }
 
-    nonisolated static func clearCookie() {
+    nonisolated func clearCookie() {
         try? FileManager.default.removeItem(at: cookieFileURL)
     }
 
-    private static func saveCookie(_ cookie: String) {
+    private func saveCookie(_ cookie: String) {
         let dir = cookieFileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
@@ -51,10 +80,6 @@ final class OllamaLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
         // Persistent (not `.nonPersistent()`): Brink's own WKWebView storage, kept
         // between launches, so signing in is a one-time thing — next time this
         // opens (e.g. after the captured cookie expires) it's already logged in.
-        // Still fully isolated from the system Chrome/Safari the user actually
-        // browses with; there's no supported way to borrow another browser's live
-        // session without reading its cookie store wholesale, which is a much
-        // bigger permission than this needs.
         config.websiteDataStore = .default()
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.navigationDelegate = self
@@ -62,7 +87,7 @@ final class OllamaLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
 
         let window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
-        window.title = L("Sign in to Ollama")
+        window.title = L("Sign in to %@", displayName)
         window.contentView = webView
         window.center()
         window.isReleasedWhenClosed = false
@@ -80,7 +105,7 @@ final class OllamaLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
         // it silently vanished. Go `.regular` for the lifetime of the login window so it
         // behaves like a normal window, then revert once it closes.
         NSApp.setActivationPolicy(.regular)
-        webView.load(URLRequest(url: URL(string: "https://ollama.com/signin")!))
+        webView.load(URLRequest(url: loginURL))
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
@@ -97,30 +122,24 @@ final class OllamaLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // Still on the sign-in page (or an SSO provider's domain) — keep waiting. The
-        // sign-in form itself lives on the `signin.ollama.com` subdomain (path "/"),
-        // so "signin" has to be checked in the host too, not just the path.
-        guard let url = webView.url, url.host?.contains("ollama.com") == true,
-              url.host?.contains("signin") != true, !url.path.contains("signin"),
+        // Still on the sign-in page (or an SSO provider's domain) — keep waiting.
+        guard let url = webView.url, url.host?.contains(host) == true,
+              !signinHints.contains(where: { url.host?.contains($0) == true || url.path.contains($0) }),
               !isVerifying else { return }
 
+        let host = self.host
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-            let relevant = cookies.filter { $0.domain.contains("ollama.com") }
+            let relevant = cookies.filter { $0.domain.contains(host) }
             guard !relevant.isEmpty else { return }
             let header = relevant.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
 
-            // A redirect landing back on ollama.com mid-flow (e.g. an OAuth callback
-            // step) can carry only the anonymous tracking cookie, not a real session.
-            // Confirm against the server before treating this as "logged in" and
-            // closing the window — otherwise the window can vanish while the user
-            // is still in the middle of signing in.
             guard let self, !self.isVerifying else { return }
             self.isVerifying = true
             Task { @MainActor in
-                let loggedIn = await OllamaProvider.verifyLoggedIn(cookie: header)
+                let loggedIn = await self.verify(header)
                 self.isVerifying = false
                 guard loggedIn else { return }
-                Self.saveCookie(header)
+                self.saveCookie(header)
                 self.closeAndRestorePolicy()
                 self.onComplete?()
             }

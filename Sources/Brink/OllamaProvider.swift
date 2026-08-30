@@ -3,12 +3,23 @@ import Foundation
 /// Ollama Cloud has no documented usage/quota API (see
 /// github.com/ollama/ollama issues #16448, #15663) — the only place the
 /// numbers exist is the server-rendered `ollama.com/settings` page. This
-/// scrapes that page's HTML with the session cookie `OllamaLogin` captured.
-/// Fragile by nature: breaks if Ollama changes that page's markup, and there
-/// is no refresh-token dance, so an expired cookie just asks the user to
-/// sign in again.
+/// scrapes that page's HTML with the session cookie `login` (a `WebLogin`)
+/// captured. Fragile by nature: breaks if Ollama changes that page's markup,
+/// and there is no refresh-token dance, so an expired cookie just asks the
+/// user to sign in again.
 final class OllamaProvider: UsageProvider {
     let id = "ollama"
+
+    static let login = WebLogin(
+        id: "ollama", displayName: "Ollama",
+        loginURL: URL(string: "https://ollama.com/signin")!,
+        host: "ollama.com",
+        // The sign-in form itself lives on the `signin.ollama.com` subdomain
+        // (path "/"), so "signin" has to be checked in the host too, not just
+        // a `/signin` path on the main domain.
+        signinHints: ["signin"],
+        verify: { cookie in (try? await OllamaProvider.fetchSettingsHTML(cookie: cookie)) != nil }
+    )
 
     private static let settingsURL = URL(string: "https://ollama.com/settings")!
     private static let userAgent =
@@ -16,14 +27,14 @@ final class OllamaProvider: UsageProvider {
 
     func fetch() async -> ProviderSnapshot {
         var snap = ProviderSnapshot(id: id, name: "Ollama", systemImage: "cloud", windows: [], error: nil)
-        guard let cookie = OllamaLogin.loadCookie() else {
+        guard let cookie = Self.login.loadCookie() else {
             return ClaudeProvider.demoSnapshot(id: id, name: "Ollama", systemImage: "cloud",
                                                note: L("Not signed in — Providers menu → Sign in to Ollama"))
         }
 
         do {
             guard let html = try await Self.fetchSettingsHTML(cookie: cookie) else {
-                OllamaLogin.clearCookie()
+                Self.login.clearCookie()
                 snap.error = L("Session expired — sign in again from the Providers menu")
                 return snap
             }
@@ -52,13 +63,6 @@ final class OllamaProvider: UsageProvider {
             return nil
         }
         return String(data: data, encoding: .utf8)
-    }
-
-    /// Used by `OllamaLogin` to confirm a cookie captured mid-flow (e.g. an
-    /// intermediate OAuth redirect back to ollama.com) is an actual signed-in
-    /// session and not just the anonymous tracking cookie set on every visit.
-    static func verifyLoggedIn(cookie: String) async -> Bool {
-        (try? await fetchSettingsHTML(cookie: cookie)) != nil
     }
 
     // MARK: Parsing (scraped from the rendered HTML, not a JSON API)

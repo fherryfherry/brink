@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                            credentialsDir: ".claude-work"),
             CodexProvider(),
             OllamaProvider(),
+            KenariProvider(),
         ])
         themeStore = ThemeStore()
         Notifier.shared.requestAuthorizationIfNeeded()

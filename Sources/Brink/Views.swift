@@ -289,7 +289,10 @@ struct SettingsMenuItems: View {
         Button(L("Test notification")) { Notifier.shared.sendTest() }
         Divider()
         Button(L("Sign in to Ollama")) {
-            OllamaLogin.shared.presentLogin { store.refreshAll() }
+            OllamaProvider.login.presentLogin { store.refreshAll() }
+        }
+        Button(L("Sign in to Kenari")) {
+            KenariProvider.login.presentLogin { store.refreshAll() }
         }
         Divider()
         Button(L("Quit Brink")) { NSApp.terminate(nil) }
