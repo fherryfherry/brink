@@ -130,9 +130,19 @@ final class ClaudeProvider: UsageProvider {
         return snap
     }
 
+    /// `Retry-After` is valid as either delta-seconds ("120") or an HTTP-date
+    /// ("Wed, 21 Oct 2026 07:28:00 GMT") per RFC 9110 §10.2.3 — both need
+    /// parsing rather than just falling back to a fixed default when the
+    /// value isn't a plain number.
     private static func retryAfterSeconds(_ response: HTTPURLResponse?) -> TimeInterval? {
         guard let value = response?.value(forHTTPHeaderField: "Retry-After") else { return nil }
-        return TimeInterval(value)
+        if let seconds = TimeInterval(value) { return seconds }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let date = formatter.date(from: value) else { return nil }
+        return max(0, date.timeIntervalSinceNow)
     }
 
     private static func requestUsage(token: String) async throws -> (Data, Int, HTTPURLResponse?) {
