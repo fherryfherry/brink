@@ -10,6 +10,13 @@ final class PanelState: ObservableObject {
 /// Owns the borderless edge panel and the detail-bubble panel.
 @MainActor
 final class PanelController {
+    /// Set by `OllamaLogin` while its sign-in window is open: the panel is a
+    /// separate always-on-top window, and its own hover/collapse machinery has
+    /// no idea a login flow is in progress on top of it, so it can collapse
+    /// (and animate/reposition) out from under an unrelated window. Simplest
+    /// fix is to just not touch the panel at all for that window's lifetime.
+    static var collapseSuspended = false
+
     private let store: UsageStore
     private let themeStore: ThemeStore
     private let state = PanelState()
@@ -24,7 +31,9 @@ final class PanelController {
 
     private var panelHovered = false
     private var detailHovered = false
+    private var menuOpen = false
     private var visibilityObserver: AnyCancellable?
+    private var menuObservers: [NSObjectProtocol] = []
 
     init(store: UsageStore, themeStore: ThemeStore) {
         self.store = store
@@ -34,6 +43,7 @@ final class PanelController {
         positionPanel(expanded: false)
         panel.orderFrontRegardless()
         installFarAwayCollapse()
+        installMenuTrackingGuard()
         visibilityObserver = themeStore.$hiddenProviders.sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -130,7 +140,8 @@ final class PanelController {
     private func installFarAwayCollapse() {
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.state.isExpanded, let screen = self.screen else { return }
+                guard let self, self.state.isExpanded, !self.menuOpen, !Self.collapseSuspended,
+                      let screen = self.screen else { return }
                 if NSEvent.mouseLocation.x < screen.frame.maxX - self.farAwayDistance {
                     self.panelHovered = false
                     self.detailHovered = false
@@ -142,8 +153,33 @@ final class PanelController {
 
     // MARK: Hover logic
 
+    /// SwiftUI's `.onHover` reports "exited" the instant the right-click context menu
+    /// (Refresh, Providers, Sign in to Ollama, ...) pops up, since that menu is a
+    /// separate overlay the mouse moves into — which would otherwise start the
+    /// collapse timer and close the panel (and the menu with it) mid-click. Track
+    /// NSMenu's own tracking session instead so an open menu always keeps it pinned.
+    private func installMenuTrackingGuard() {
+        let center = NotificationCenter.default
+        menuObservers = [
+            center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.menuOpen = true
+                    self.hoverChanged()
+                }
+            },
+            center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.menuOpen = false
+                    self.hoverChanged()
+                }
+            },
+        ]
+    }
+
     private func hoverChanged() {
-        if panelHovered || detailHovered {
+        if panelHovered || detailHovered || menuOpen || Self.collapseSuspended {
             collapseTask?.cancel()
             collapseTask = nil
             if !state.isExpanded { expand() }
@@ -162,7 +198,7 @@ final class PanelController {
         collapseTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000)
             guard !Task.isCancelled, let self else { return }
-            guard !self.panelHovered, !self.detailHovered else { return }
+            guard !self.panelHovered, !self.detailHovered, !self.menuOpen, !Self.collapseSuspended else { return }
             self.state.isExpanded = false
             self.hideDetail()
             try? await Task.sleep(nanoseconds: 400_000_000)

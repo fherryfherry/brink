@@ -129,9 +129,14 @@ struct ProviderIcon: View {
         return dict
     }()
 
+    // Multiple accounts for the same CLI (e.g. "claude-work") share that CLI's logo/glyph.
+    private var logoKey: String {
+        id.hasPrefix("claude") ? "claude" : (id.hasPrefix("codex") ? "codex" : id)
+    }
+
     var body: some View {
         Group {
-            if let logo = Self.logos[id] {
+            if let logo = Self.logos[logoKey] {
                 Image(nsImage: logo)
                     .renderingMode(.template)
                     .resizable()
@@ -139,7 +144,7 @@ struct ProviderIcon: View {
                     .aspectRatio(contentMode: .fit)
                     .foregroundColor(color)
             } else {
-                switch id {
+                switch logoKey {
                 case "claude":
                     ClaudeIcon().stroke(color, style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
                 case "codex":
@@ -282,6 +287,10 @@ struct SettingsMenuItems: View {
             set: { Notifier.shared.setEnabled($0) }
         ))
         Button(L("Test notification")) { Notifier.shared.sendTest() }
+        Divider()
+        Button(L("Sign in to Ollama")) {
+            OllamaLogin.shared.presentLogin { store.refreshAll() }
+        }
         Divider()
         Button(L("Quit Brink")) { NSApp.terminate(nil) }
     }

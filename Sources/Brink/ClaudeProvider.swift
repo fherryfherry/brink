@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 /// Reads Claude Code's OAuth access token (macOS Keychain or
 /// ~/.claude/.credentials.json) and queries Anthropic's usage endpoint —
@@ -12,8 +13,33 @@ import Security
 ///   (Claude Code keeps it fresh whenever it runs).
 /// - Only the short-lived access token (+ expiry) is cached locally, so the
 ///   Keychain prompt appears once, not on every refresh cycle.
-struct ClaudeProvider: UsageProvider {
-    let id = "claude"
+/// - One instance = one Claude Code account/profile. Point `credentialsDir`
+///   at a different `~/.<dir>` (e.g. a `CLAUDE_CONFIG_DIR`-style profile
+///   like `.claude-work`) to show a second account as its own ring.
+///   Claude Code keys its Keychain item by config dir: the default
+///   `~/.claude` uses the plain "Claude Code-credentials" service, while any
+///   other `CLAUDE_CONFIG_DIR` uses "Claude Code-credentials-<sha256(path)[:8]>".
+final class ClaudeProvider: UsageProvider {
+    let id: String
+    let displayName: String
+    private let credentialsDir: String
+
+    /// Matches Claude Code's own keychain service naming for CLAUDE_CONFIG_DIR profiles.
+    private var keychainService: String {
+        if credentialsDir == ".claude" { return "Claude Code-credentials" }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(credentialsDir).path
+        let hash = SHA256.hash(data: Data(path.utf8))
+            .map { String(format: "%02x", $0) }.joined().prefix(8)
+        return "Claude Code-credentials-\(hash)"
+    }
+
+    init(id: String = "claude", displayName: String = "Claude",
+         credentialsDir: String = ".claude") {
+        self.id = id
+        self.displayName = displayName
+        self.credentialsDir = credentialsDir
+    }
 
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
@@ -27,31 +53,51 @@ struct ClaudeProvider: UsageProvider {
         }
     }
 
+    // MARK: Response cache / 429 backoff
+    //
+    // The usage endpoint is shared with Claude Code's own `/usage` command and
+    // any other client polling it, so it rate-limits fairly easily. On a 429
+    // we stop hitting the network until Anthropic's own `Retry-After` window
+    // has passed, and meanwhile keep showing the last good numbers instead of
+    // blanking the ring out.
+    private var cache: ProviderSnapshot?
+    private var cooldownUntil: Date?
+
     func fetch() async -> ProviderSnapshot {
-        var snap = ProviderSnapshot(id: id, name: "Claude",
+        if let until = cooldownUntil, Date() < until {
+            return rateLimitedSnapshot(retryAt: until)
+        }
+
+        var snap = ProviderSnapshot(id: id, name: displayName,
                                     systemImage: "asterisk",
                                     windows: [], error: nil,
                                     accent: UsageColor.claudeOrange)
-        guard let creds = Self.loadCredentials() else {
-            var demo = Self.demoSnapshot(name: "Claude", systemImage: "asterisk",
+        guard let creds = loadCredentials() else {
+            var demo = Self.demoSnapshot(id: id, name: displayName, systemImage: "asterisk",
                                          note: L("Claude Code credentials not found"))
             demo.accent = UsageColor.claudeOrange
             return demo
         }
 
         do {
-            var (data, status) = try await Self.requestUsage(token: creds.accessToken)
+            var (data, status, response) = try await Self.requestUsage(token: creds.accessToken)
             if status == 401 {
                 // Claude Code rotated its token: drop our cache, re-read its store
                 // (Keychain / file) and retry once right away.
-                Self.clearOwnCopy()
-                if let fresh = Self.loadCredentials(), fresh.accessToken != creds.accessToken {
-                    (data, status) = try await Self.requestUsage(token: fresh.accessToken)
+                clearOwnCopy()
+                if let fresh = loadCredentials(), fresh.accessToken != creds.accessToken {
+                    (data, status, response) = try await Self.requestUsage(token: fresh.accessToken)
                 }
             }
             if status == 401 {
                 snap.error = L("Unauthorized — open Claude Code once to refresh login")
                 return snap
+            }
+            if status == 429 {
+                let retrySeconds = Self.retryAfterSeconds(response) ?? 60
+                let until = Date().addingTimeInterval(retrySeconds)
+                cooldownUntil = until
+                return rateLimitedSnapshot(retryAt: until)
             }
             guard status == 200 else {
                 snap.error = L("HTTP %d", status)
@@ -60,6 +106,8 @@ struct ClaudeProvider: UsageProvider {
             snap.windows = Self.parseUsage(data)
             snap.updatedAt = Date()
             if snap.windows.isEmpty { snap.error = L("No usage data in response") }
+            cooldownUntil = nil
+            cache = snap
             return snap
         } catch {
             snap.error = error.localizedDescription
@@ -67,14 +115,35 @@ struct ClaudeProvider: UsageProvider {
         }
     }
 
-    private static func requestUsage(token: String) async throws -> (Data, Int) {
+    /// While rate-limited, prefer the last good snapshot (still shows real
+    /// numbers) over a blank/error ring; falls back to an error if we never
+    /// had one yet.
+    private func rateLimitedSnapshot(retryAt: Date) -> ProviderSnapshot {
+        let waitMin = max(1, Int(retryAt.timeIntervalSinceNow / 60))
+        if var snap = cache {
+            snap.error = L("Rate limited — showing cached usage, retrying in ~%d min", waitMin)
+            return snap
+        }
+        var snap = ProviderSnapshot(id: id, name: displayName, systemImage: "asterisk",
+                                    windows: [], error: nil, accent: UsageColor.claudeOrange)
+        snap.error = L("Rate limited (429) — retrying in ~%d min", waitMin)
+        return snap
+    }
+
+    private static func retryAfterSeconds(_ response: HTTPURLResponse?) -> TimeInterval? {
+        guard let value = response?.value(forHTTPHeaderField: "Retry-After") else { return nil }
+        return TimeInterval(value)
+    }
+
+    private static func requestUsage(token: String) async throws -> (Data, Int, HTTPURLResponse?) {
         var request = URLRequest(url: usageURL)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("Brink/1.0", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
-        return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+        let http = response as? HTTPURLResponse
+        return (data, http?.statusCode ?? 0, http)
     }
 
     // MARK: Parsing
@@ -162,54 +231,55 @@ struct ClaudeProvider: UsageProvider {
     /// Lookup order is chosen to keep the macOS Keychain prompt to a minimum:
     ///  1) In-memory cache (no I/O while the app is running)
     ///  2) Brink's own cache of the access token (written after a successful read)
-    ///  3) ~/.claude/.credentials.json (file store used by Claude Code on some setups)
-    ///  4) Keychain item "Claude Code-credentials" — this is what triggers the
-    ///     macOS prompt. Clicking "Always Allow" makes it silent afterwards.
+    ///  3) ~/<credentialsDir>/.credentials.json (file store used by Claude Code on some setups)
+    ///  4) `keychainService` — this is what triggers the macOS prompt. Clicking
+    ///     "Always Allow" makes it silent afterwards.
     /// Expired tokens are discarded so Claude Code's fresher copy is picked up.
-    static func loadCredentials() -> Credentials? {
+    func loadCredentials() -> Credentials? {
         if let cached = memoryCache, !cached.isExpired { return cached }
 
         if let data = try? Data(contentsOf: ownStoreURL),
-           let creds = parseCredentialsJSON(data), !creds.isExpired {
+           let creds = Self.parseCredentialsJSON(data), !creds.isExpired {
             memoryCache = creds
             return creds
         }
 
         let claudeFile = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.credentials.json")
+            .appendingPathComponent("\(credentialsDir)/.credentials.json")
         if let data = try? Data(contentsOf: claudeFile),
-           let creds = parseCredentialsJSON(data), !creds.isExpired {
+           let creds = Self.parseCredentialsJSON(data), !creds.isExpired {
             saveOwnCopy(creds)
             return creds
         }
 
         // Don't hammer the Keychain (and the user with prompts) if it keeps failing.
-        if let last = lastKeychainAttempt, Date().timeIntervalSince(last) < keychainRetryInterval {
+        if let last = lastKeychainAttempt, Date().timeIntervalSince(last) < Self.keychainRetryInterval {
             return nil
         }
         lastKeychainAttempt = Date()
-        if let data = keychainData(service: "Claude Code-credentials"),
-           let creds = parseCredentialsJSON(data), !creds.isExpired {
+        if let data = Self.keychainData(service: keychainService),
+           let creds = Self.parseCredentialsJSON(data), !creds.isExpired {
             saveOwnCopy(creds)
             return creds
         }
         return nil
     }
 
-    // MARK: Own credential cache (~/Library/Application Support/Brink/credentials.json)
+    // MARK: Own credential cache (~/Library/Application Support/Brink/credentials[-<id>].json)
     // Holds ONLY the short-lived access token and its expiry — never the refresh token.
 
-    private static var memoryCache: Credentials?
-    private static var lastKeychainAttempt: Date?
+    private var memoryCache: Credentials?
+    private var lastKeychainAttempt: Date?
     private static let keychainRetryInterval: TimeInterval = 10 * 60
 
-    static var ownStoreURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    var ownStoreURL: URL {
+        let file = id == "claude" ? "credentials.json" : "credentials-\(id).json"
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Brink", isDirectory: true)
-            .appendingPathComponent("credentials.json")
+            .appendingPathComponent(file)
     }
 
-    static func saveOwnCopy(_ creds: Credentials) {
+    func saveOwnCopy(_ creds: Credentials) {
         memoryCache = creds
         var oauth: [String: Any] = ["accessToken": creds.accessToken]
         if let e = creds.expiresAt { oauth["expiresAt"] = Int(e.timeIntervalSince1970 * 1000) }
@@ -221,7 +291,7 @@ struct ClaudeProvider: UsageProvider {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: ownStoreURL.path)
     }
 
-    static func clearOwnCopy() {
+    func clearOwnCopy() {
         memoryCache = nil
         lastKeychainAttempt = nil
         try? FileManager.default.removeItem(at: ownStoreURL)
@@ -255,9 +325,9 @@ struct ClaudeProvider: UsageProvider {
 
     // MARK: Demo fallback
 
-    static func demoSnapshot(name: String, systemImage: String, note: String) -> ProviderSnapshot {
+    static func demoSnapshot(id: String, name: String, systemImage: String, note: String) -> ProviderSnapshot {
         ProviderSnapshot(
-            id: name.lowercased(), name: name, systemImage: systemImage,
+            id: id, name: name, systemImage: systemImage,
             windows: [
                 UsageWindow(label: "Current session", usedPercent: 73,
                             resetsAt: Date().addingTimeInterval(51 * 60)),

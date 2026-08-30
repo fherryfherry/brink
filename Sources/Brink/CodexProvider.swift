@@ -12,7 +12,7 @@ struct CodexProvider: UsageProvider {
                                     systemImage: "terminal",
                                     windows: [], error: nil)
         guard let auth = Self.loadAuth() else {
-            return ClaudeProvider.demoSnapshot(name: "Codex", systemImage: "terminal",
+            return ClaudeProvider.demoSnapshot(id: "codex", name: "Codex", systemImage: "terminal",
                                                note: L("Codex CLI credentials not found (~/.codex/auth.json)"))
         }
 
