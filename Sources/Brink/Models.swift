@@ -71,6 +71,9 @@ protocol UsageProvider {
 final class UsageStore: ObservableObject {
     @Published var snapshots: [ProviderSnapshot] = []
     @Published var lastRefresh: Date?
+    /// Provider ids currently mid-fetch, so rings can show a spinner instead
+    /// of silently sitting there (or silently failing) with no feedback.
+    @Published var refreshingIDs: Set<String> = []
 
     private let providers: [UsageProvider]
     private var timer: Timer?
@@ -94,17 +97,23 @@ final class UsageStore: ObservableObject {
 
     func refreshAll() {
         Task {
-            var results: [ProviderSnapshot] = []
+            await MainActor.run { self.refreshingIDs.formUnion(self.providers.map(\.id)) }
+            // Sequential, not parallel: providers share rate-limited endpoints
+            // (see ClaudeProvider's 429 backoff), so fetching them all at once
+            // would just make that worse. Updating the store as each one
+            // finishes (instead of batching until the last one lands) is what
+            // makes the per-ring spinner actually mean something.
             for provider in providers {
                 let snap = await provider.fetch()
-                results.append(snap)
+                if let idx = snapshots.firstIndex(where: { $0.id == provider.id }) {
+                    snapshots[idx] = snap
+                } else {
+                    snapshots.append(snap)
+                }
+                refreshingIDs.remove(provider.id)
             }
-            let final = results
-            await MainActor.run {
-                self.snapshots = final
-                self.lastRefresh = Date()
-                Notifier.shared.observe(final)
-            }
+            lastRefresh = Date()
+            Notifier.shared.observe(snapshots)
         }
     }
 }

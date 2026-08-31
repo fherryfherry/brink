@@ -180,10 +180,15 @@ extension View {
 struct UsageRing: View {
     let snapshot: ProviderSnapshot
     let palette: Palette
+    let isRefreshing: Bool
     @State private var hovering = false
 
     private var percent: Double { snapshot.primary?.usedPercent ?? 0 }
     private var hasData: Bool { !snapshot.windows.isEmpty }
+    // Demo (not signed in yet) always carries a note in `error` — that's not
+    // a failed refresh, it's an expected "not configured" state with its own
+    // faded/"--" look already, so it doesn't also get the failure badge.
+    private var hasError: Bool { snapshot.error != nil && !snapshot.isDemo }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -201,6 +206,20 @@ struct UsageRing: View {
             .scaleEffect(hovering ? 1.08 : 1)
             .animation(.spring(response: 0.28, dampingFraction: 0.55), value: hovering)
             .opacity(hasData ? 1 : 0.35)
+            .overlay(alignment: .topTrailing) {
+                if isRefreshing {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.7)
+                        .offset(x: 3, y: -3)
+                } else if hasError {
+                    Circle()
+                        .fill(Color.red)
+                        .overlay(Circle().stroke(.black.opacity(0.25), lineWidth: 1))
+                        .frame(width: 7, height: 7)
+                        .offset(x: 1, y: -1)
+                }
+            }
 
             Text(hasData ? "\(Int(percent.rounded()))%" : "--")
                 .font(.system(size: 13.5, weight: .semibold))
@@ -235,7 +254,8 @@ struct TabView: View {
     var body: some View {
         VStack(spacing: Layout.ringGap) {
             ForEach(visible) { snap in
-                UsageRing(snapshot: snap, palette: palette)
+                UsageRing(snapshot: snap, palette: palette,
+                          isRefreshing: store.refreshingIDs.contains(snap.id))
                     .background(GeometryReader { geo in
                         Color.clear.preference(key: RingCenterKey.self,
                                                value: [snap.id: geo.frame(in: .global).midY])
