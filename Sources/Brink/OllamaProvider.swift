@@ -8,33 +8,39 @@ import Foundation
 /// and there is no refresh-token dance, so an expired cookie just asks the
 /// user to sign in again.
 final class OllamaProvider: UsageProvider {
-    let id = "ollama"
+    let id: String
+    let displayName: String
+    let login: WebLogin
 
-    static let login = WebLogin(
-        id: "ollama", displayName: "Ollama",
-        loginURL: URL(string: "https://ollama.com/signin")!,
-        host: "ollama.com",
-        // The sign-in form itself lives on the `signin.ollama.com` subdomain
-        // (path "/"), so "signin" has to be checked in the host too, not just
-        // a `/signin` path on the main domain.
-        signinHints: ["signin"],
-        verify: { cookie in (try? await OllamaProvider.fetchSettingsHTML(cookie: cookie)) != nil }
-    )
+    init(id: String = "ollama", displayName: String = "Ollama") {
+        self.id = id
+        self.displayName = displayName
+        self.login = WebLogin(
+            id: id, displayName: displayName,
+            loginURL: URL(string: "https://ollama.com/signin")!,
+            host: "ollama.com",
+            // The sign-in form itself lives on the `signin.ollama.com` subdomain
+            // (path "/"), so "signin" has to be checked in the host too, not just
+            // a `/signin` path on the main domain.
+            signinHints: ["signin"],
+            verify: { cookie in (try? await OllamaProvider.fetchSettingsHTML(cookie: cookie)) != nil }
+        )
+    }
 
     private static let settingsURL = URL(string: "https://ollama.com/settings")!
     private static let userAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
     func fetch() async -> ProviderSnapshot {
-        var snap = ProviderSnapshot(id: id, name: "Ollama", systemImage: "cloud", windows: [], error: nil)
-        guard let cookie = Self.login.loadCookie() else {
-            return ClaudeProvider.demoSnapshot(id: id, name: "Ollama", systemImage: "cloud",
+        var snap = ProviderSnapshot(id: id, name: displayName, systemImage: "cloud", windows: [], error: nil)
+        guard let cookie = login.loadCookie() else {
+            return ClaudeProvider.demoSnapshot(id: id, name: displayName, systemImage: "cloud",
                                                note: L("Not signed in — Providers menu → Sign in to Ollama"))
         }
 
         do {
             guard let html = try await Self.fetchSettingsHTML(cookie: cookie) else {
-                Self.login.clearCookie()
+                login.clearCookie()
                 snap.error = L("Session expired — sign in again from the Providers menu")
                 return snap
             }

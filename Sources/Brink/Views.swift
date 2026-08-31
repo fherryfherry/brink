@@ -182,6 +182,7 @@ struct UsageRing: View {
     let palette: Palette
     let isRefreshing: Bool
     @State private var hovering = false
+    @State private var spin = false
 
     private var percent: Double { snapshot.primary?.usedPercent ?? 0 }
     private var hasData: Bool { !snapshot.windows.isEmpty }
@@ -189,17 +190,24 @@ struct UsageRing: View {
     // a failed refresh, it's an expected "not configured" state with its own
     // faded/"--" look already, so it doesn't also get the failure badge.
     private var hasError: Bool { snapshot.error != nil && !snapshot.isDemo }
+    // While refreshing, spin a short arc of the ring's own color instead of a
+    // separate loading element; the real percent arc reappears once it lands.
+    private var arcEnd: Double { isRefreshing ? 0.22 : (hasData ? (snapshot.primary?.fraction ?? 0) : 0) }
 
     var body: some View {
         VStack(spacing: 6) {
             ZStack {
                 Circle().stroke(palette.track, lineWidth: 5)
                 Circle()
-                    .trim(from: 0, to: hasData ? (snapshot.primary?.fraction ?? 0) : 0)
+                    .trim(from: 0, to: arcEnd)
                     .stroke(UsageColor.color(for: snapshot, percent: percent),
                             style: StrokeStyle(lineWidth: 5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
+                    .rotationEffect(.degrees(spin ? 360 : 0))
                     .animation(.easeOut(duration: 0.6), value: percent)
+                    .animation(spin ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .easeOut(duration: 0.3),
+                               value: spin)
+                    .onChange(of: isRefreshing) { spin = $0 }
                 ProviderIcon(id: snapshot.id, size: 18, color: palette.fg)
             }
             .frame(width: Layout.ringSize, height: Layout.ringSize)
@@ -207,12 +215,7 @@ struct UsageRing: View {
             .animation(.spring(response: 0.28, dampingFraction: 0.55), value: hovering)
             .opacity(hasData ? 1 : 0.35)
             .overlay(alignment: .topTrailing) {
-                if isRefreshing {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.7)
-                        .offset(x: 3, y: -3)
-                } else if hasError {
+                if hasError && !isRefreshing {
                     Circle()
                         .fill(Color.red)
                         .overlay(Circle().stroke(.black.opacity(0.25), lineWidth: 1))
@@ -278,6 +281,7 @@ struct TabView: View {
 struct SettingsMenuItems: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var themeStore: ThemeStore
+    @ObservedObject private var accountStore = AccountStore.shared
 
     var body: some View {
         Button(L("Refresh now")) { store.refreshAll() }
@@ -288,6 +292,25 @@ struct SettingsMenuItems: View {
                     get: { !themeStore.hiddenProviders.contains(snap.id) },
                     set: { themeStore.setVisible(snap.id, $0, all: store.snapshots.map(\.id)) }
                 ))
+            }
+        }
+        Menu(L("Accounts")) {
+            ForEach(accountStore.accounts.filter { $0.kind == .ollama || $0.kind == .kenari }) { account in
+                Button(L("Sign in to %@", account.displayName)) {
+                    store.webLogin(for: account.id)?.presentLogin { store.refreshAll() }
+                }
+            }
+            Divider()
+            Menu(L("Add account")) {
+                Button(L("Claude…")) { addClaude() }
+                Button(L("Codex…")) { addCodex() }
+                Button(L("Ollama…")) { addOllama() }
+                Button(L("Kenari…")) { addKenari() }
+            }
+            Menu(L("Remove account")) {
+                ForEach(accountStore.accounts) { account in
+                    Button(account.displayName) { removeAccount(account) }
+                }
             }
         }
         Picker(L("Appearance"), selection: $themeStore.theme) {
@@ -308,14 +331,52 @@ struct SettingsMenuItems: View {
         ))
         Button(L("Test notification")) { Notifier.shared.sendTest() }
         Divider()
-        Button(L("Sign in to Ollama")) {
-            OllamaProvider.login.presentLogin { store.refreshAll() }
-        }
-        Button(L("Sign in to Kenari")) {
-            KenariProvider.login.presentLogin { store.refreshAll() }
-        }
-        Divider()
         Button(L("Quit Brink")) { NSApp.terminate(nil) }
+    }
+
+    // MARK: Add / remove accounts
+
+    private func addClaude() {
+        guard let (name, dir) = AccountPrompt.twoFields(
+            title: L("Add Claude account"),
+            message: L("The config folder must already exist under your home directory (this is what CLAUDE_CONFIG_DIR points Claude Code at for that profile)."),
+            label1: L("Display name"), placeholder1: "Claude (personal)",
+            label2: L("Config folder (under ~)"), placeholder2: ".claude-personal"
+        ) else { return }
+        accountStore.add(kind: .claude, displayName: name, configDir: dir.isEmpty ? nil : dir)
+    }
+
+    private func addCodex() {
+        guard let (name, dir) = AccountPrompt.twoFields(
+            title: L("Add Codex account"),
+            message: L("The config folder must already exist under your home directory (this is what CODEX_HOME points Codex CLI at for that profile). Leave blank for the default ~/.codex."),
+            label1: L("Display name"), placeholder1: "Codex (personal)",
+            label2: L("Config folder (under ~), optional"), placeholder2: ".codex-personal"
+        ) else { return }
+        accountStore.add(kind: .codex, displayName: name, configDir: dir.isEmpty ? nil : dir)
+    }
+
+    private func addOllama() {
+        guard let name = AccountPrompt.text(
+            title: L("Add Ollama account"), message: L("A display name for this account."),
+            placeholder: "Ollama"
+        ) else { return }
+        let config = accountStore.add(kind: .ollama, displayName: name, configDir: nil)
+        store.webLogin(for: config.id)?.presentLogin { store.refreshAll() }
+    }
+
+    private func addKenari() {
+        guard let name = AccountPrompt.text(
+            title: L("Add Kenari account"), message: L("A display name for this account."),
+            placeholder: "Kenari"
+        ) else { return }
+        let config = accountStore.add(kind: .kenari, displayName: name, configDir: nil)
+        store.webLogin(for: config.id)?.presentLogin { store.refreshAll() }
+    }
+
+    private func removeAccount(_ account: AccountConfig) {
+        guard AccountPrompt.confirmRemove(displayName: account.displayName) else { return }
+        accountStore.remove(account)
     }
 }
 

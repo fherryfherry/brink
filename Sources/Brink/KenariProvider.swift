@@ -5,27 +5,33 @@ import Foundation
 /// cookie `login` (a `WebLogin`) captured is valid, or 401 `"no session"`
 /// otherwise — no HTML scraping needed.
 final class KenariProvider: UsageProvider {
-    let id = "kenari"
+    let id: String
+    let displayName: String
+    let login: WebLogin
 
-    static let login = WebLogin(
-        id: "kenari", displayName: "Kenari",
-        loginURL: URL(string: "https://kenari.id/login")!,
-        host: "kenari.id",
-        signinHints: ["login"],
-        verify: { cookie in await KenariProvider.fetchSubscription(cookie: cookie) != nil }
-    )
+    init(id: String = "kenari", displayName: String = "Kenari") {
+        self.id = id
+        self.displayName = displayName
+        self.login = WebLogin(
+            id: id, displayName: displayName,
+            loginURL: URL(string: "https://kenari.id/login")!,
+            host: "kenari.id",
+            signinHints: ["login"],
+            verify: { cookie in await KenariProvider.fetchSubscription(cookie: cookie) != nil }
+        )
+    }
 
     private static let subscriptionURL = URL(string: "https://kenari.id/api/subscription")!
 
     func fetch() async -> ProviderSnapshot {
-        var snap = ProviderSnapshot(id: id, name: "Kenari", systemImage: "cloud", windows: [], error: nil)
-        guard let cookie = Self.login.loadCookie() else {
-            return ClaudeProvider.demoSnapshot(id: id, name: "Kenari", systemImage: "cloud",
+        var snap = ProviderSnapshot(id: id, name: displayName, systemImage: "cloud", windows: [], error: nil)
+        guard let cookie = login.loadCookie() else {
+            return ClaudeProvider.demoSnapshot(id: id, name: displayName, systemImage: "cloud",
                                                note: L("Not signed in — Providers menu → Sign in to Kenari"))
         }
 
         guard let json = await Self.fetchSubscription(cookie: cookie) else {
-            Self.login.clearCookie()
+            login.clearCookie()
             snap.error = L("Session expired — sign in again from the Providers menu")
             return snap
         }

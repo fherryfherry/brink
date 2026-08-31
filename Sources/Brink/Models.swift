@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 // MARK: - Data model
 
@@ -75,15 +76,51 @@ final class UsageStore: ObservableObject {
     /// of silently sitting there (or silently failing) with no feedback.
     @Published var refreshingIDs: Set<String> = []
 
-    private let providers: [UsageProvider]
+    private var providers: [UsageProvider] = []
     private var timer: Timer?
+    private var accountsObserver: AnyCancellable?
 
-    init(providers: [UsageProvider]) {
-        self.providers = providers
-        self.snapshots = providers.map {
-            ProviderSnapshot(id: $0.id, name: $0.id.capitalized,
-                             systemImage: "hourglass", windows: [], error: nil)
+    /// Providers are rebuilt from `AccountStore.shared.accounts` whenever it
+    /// changes (an account added/removed from the menu), rather than fixed at
+    /// launch — snapshots for accounts that still exist are kept as-is, new
+    /// ones get fetched immediately, removed ones just drop off.
+    init() {
+        // @Published's publisher replays the current value to new subscribers
+        // immediately, so this alone also does the initial build.
+        accountsObserver = AccountStore.shared.$accounts.sink { [weak self] configs in
+            self?.rebuildProviders(from: configs)
         }
+    }
+
+    /// Looks up the `WebLogin` for an Ollama/Kenari account so the menu can
+    /// present its sign-in window (Claude/Codex read local credentials, so
+    /// they have no login flow to trigger from here).
+    func webLogin(for id: String) -> WebLogin? {
+        switch providers.first(where: { $0.id == id }) {
+        case let p as OllamaProvider: return p.login
+        case let p as KenariProvider: return p.login
+        default: return nil
+        }
+    }
+
+    private func rebuildProviders(from configs: [AccountConfig]) {
+        let newProviders = configs.map { $0.makeProvider() }
+        let newOrder = newProviders.map(\.id)
+        let newIDs = Set(newOrder)
+        let existingIDs = Set(snapshots.map(\.id))
+
+        var kept = snapshots.filter { newIDs.contains($0.id) }
+        for provider in newProviders where !existingIDs.contains(provider.id) {
+            kept.append(ProviderSnapshot(id: provider.id, name: provider.id.capitalized,
+                                         systemImage: "hourglass", windows: [], error: nil))
+        }
+        kept.sort { (newOrder.firstIndex(of: $0.id) ?? 0) < (newOrder.firstIndex(of: $1.id) ?? 0) }
+
+        providers = newProviders
+        snapshots = kept
+
+        let addedIDs = newIDs.subtracting(existingIDs)
+        if !addedIDs.isEmpty { refresh(ids: addedIDs) }
     }
 
     func startAutoRefresh(interval: TimeInterval = 120) {
@@ -96,14 +133,18 @@ final class UsageStore: ObservableObject {
     }
 
     func refreshAll() {
+        refresh(ids: Set(providers.map(\.id)))
+    }
+
+    private func refresh(ids: Set<String>) {
         Task {
-            await MainActor.run { self.refreshingIDs.formUnion(self.providers.map(\.id)) }
+            refreshingIDs.formUnion(ids)
             // Sequential, not parallel: providers share rate-limited endpoints
             // (see ClaudeProvider's 429 backoff), so fetching them all at once
             // would just make that worse. Updating the store as each one
             // finishes (instead of batching until the last one lands) is what
             // makes the per-ring spinner actually mean something.
-            for provider in providers {
+            for provider in providers where ids.contains(provider.id) {
                 let snap = await provider.fetch()
                 if let idx = snapshots.firstIndex(where: { $0.id == provider.id }) {
                     snapshots[idx] = snap

@@ -43,6 +43,7 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private var webView: WKWebView?
     private var onComplete: (() -> Void)?
     private var isVerifying = false
+    private var urlObservation: NSKeyValueObservation?
 
     nonisolated private var cookieFileURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -84,6 +85,13 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.navigationDelegate = self
         self.webView = webView
+        // Some login pages (e.g. kenari.id, a client-routed SPA) redirect an
+        // already-authenticated session with a `pushState` route change
+        // instead of a real page load, which never fires `didFinish`. KVO on
+        // `url` catches that too, since it's backed by `window.location`.
+        urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
+            self?.checkLoginState(webView: webView)
+        }
 
         let window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .closable, .resizable],
                               backing: .buffered, defer: false)
@@ -122,6 +130,10 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        checkLoginState(webView: webView)
+    }
+
+    private func checkLoginState(webView: WKWebView) {
         // Still on the sign-in page (or an SSO provider's domain) — keep waiting.
         guard let url = webView.url, url.host?.contains(host) == true,
               !signinHints.contains(where: { url.host?.contains($0) == true || url.path.contains($0) }),

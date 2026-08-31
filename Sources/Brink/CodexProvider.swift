@@ -1,18 +1,29 @@
 import Foundation
 
-/// Reads the Codex CLI's OAuth token (~/.codex/auth.json) and queries the
-/// ChatGPT backend usage endpoint, as documented by the CodexBar project.
+/// Reads the Codex CLI's OAuth token (~/.codex/auth.json, or `codexHome`/
+/// auth.json for a second profile) and queries the ChatGPT backend usage
+/// endpoint, as documented by the CodexBar project.
 struct CodexProvider: UsageProvider {
-    let id = "codex"
+    let id: String
+    let displayName: String
+    /// A `CODEX_HOME`-style folder name (e.g. ".codex-work"); nil uses the
+    /// `CODEX_HOME` env var if set, else `~/.codex` — Codex CLI's own default.
+    let codexHome: String?
+
+    init(id: String = "codex", displayName: String = "Codex", codexHome: String? = nil) {
+        self.id = id
+        self.displayName = displayName
+        self.codexHome = codexHome
+    }
 
     private static let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
 
     func fetch() async -> ProviderSnapshot {
-        var snap = ProviderSnapshot(id: id, name: "Codex",
+        var snap = ProviderSnapshot(id: id, name: displayName,
                                     systemImage: "terminal",
                                     windows: [], error: nil)
-        guard let auth = Self.loadAuth() else {
-            return ClaudeProvider.demoSnapshot(id: "codex", name: "Codex", systemImage: "terminal",
+        guard let auth = loadAuth() else {
+            return ClaudeProvider.demoSnapshot(id: id, name: displayName, systemImage: "terminal",
                                                note: L("Codex CLI credentials not found (~/.codex/auth.json)"))
         }
 
@@ -50,8 +61,9 @@ struct CodexProvider: UsageProvider {
         var accountID: String?
     }
 
-    static func loadAuth() -> Auth? {
-        let home = ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
+    func loadAuth() -> Auth? {
+        let home = codexHome.map { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent($0) }
+            ?? ProcessInfo.processInfo.environment["CODEX_HOME"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         let url = home.appendingPathComponent("auth.json")
         guard let data = try? Data(contentsOf: url),
