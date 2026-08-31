@@ -138,8 +138,15 @@ final class PanelController {
     private let farAwayDistance: CGFloat = 480
 
     private func installFarAwayCollapse() {
+        // This fires on every mouse-moved event system-wide — potentially 100+/sec
+        // while the cursor is in motion, e.g. while hovering the settings menu.
+        // Global monitors already deliver on the main thread, so spawning a fresh
+        // Task per event here (as this used to) meant creating and scheduling that
+        // many Task objects a second, competing with AppKit's own menu-tracking
+        // loop for the main thread and showing up as the menu's hover highlight
+        // lagging behind the cursor.
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 guard let self, self.state.isExpanded, !self.menuOpen, !Self.collapseSuspended,
                       let screen = self.screen else { return }
                 if NSEvent.mouseLocation.x < screen.frame.maxX - self.farAwayDistance {
@@ -160,16 +167,21 @@ final class PanelController {
     /// NSMenu's own tracking session instead so an open menu always keeps it pinned.
     private func installMenuTrackingGuard() {
         let center = NotificationCenter.default
+        // `queue: .main` already guarantees these run on the main thread — no
+        // need to also bounce through a freshly spawned Task to reach the
+        // MainActor, which just adds a scheduling round-trip on every single
+        // submenu open/close as you navigate a nested menu (Accounts > Add
+        // account > ...), noticeably enough to feel like hover lag.
         menuObservers = [
             center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in
+                MainActor.assumeIsolated {
                     guard let self else { return }
                     self.menuOpen = true
                     self.hoverChanged()
                 }
             },
             center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in
+                MainActor.assumeIsolated {
                     guard let self else { return }
                     self.menuOpen = false
                     self.hoverChanged()

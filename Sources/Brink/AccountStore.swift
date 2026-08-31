@@ -58,12 +58,12 @@ final class AccountStore: ObservableObject {
            let decoded = try? JSONDecoder().decode([AccountConfig].self, from: data), !decoded.isEmpty {
             accounts = decoded
         } else {
+            // Matches what Brink always shipped with (Claude + Codex only) — Ollama,
+            // Kenari, or a second Claude/Codex profile are per-user setups, added via
+            // Providers > Accounts > Add account, not something to guess a default for.
             accounts = [
                 AccountConfig(id: "claude", kind: .claude, displayName: "Claude", configDir: ".claude"),
-                AccountConfig(id: "claude-work", kind: .claude, displayName: "Claude (work)", configDir: ".claude-work"),
                 AccountConfig(id: "codex", kind: .codex, displayName: "Codex", configDir: nil),
-                AccountConfig(id: "ollama", kind: .ollama, displayName: "Ollama", configDir: nil),
-                AccountConfig(id: "kenari", kind: .kenari, displayName: "Kenari", configDir: nil),
             ]
             save()
         }
