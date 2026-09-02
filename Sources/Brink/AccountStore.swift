@@ -96,7 +96,7 @@ final class AccountStore: ObservableObject {
         case .codex:
             break // Codex reads Codex CLI's own auth.json; Brink caches nothing for it.
         case .ollama, .kenari:
-            try? FileManager.default.removeItem(at: support.appendingPathComponent("\(account.id)-cookie.json"))
+            break // WebLogin reads live from WKWebsiteDataStore now; nothing on disk to remove.
         }
     }
 

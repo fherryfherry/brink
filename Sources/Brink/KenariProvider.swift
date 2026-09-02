@@ -1,8 +1,8 @@
 import Foundation
 
 /// kenari.id has a real JSON API behind its dashboard (unlike Ollama Cloud):
-/// `GET /api/subscription` returns 200 with usage data when the session
-/// cookie `login` (a `WebLogin`) captured is valid, or 401 `"no session"`
+/// `GET /api/subscription` returns 200 with usage data given the live
+/// session cookie from `login` (a `WebLogin`), or 401 `"no session"`
 /// otherwise — no HTML scraping needed.
 final class KenariProvider: UsageProvider {
     let id: String
@@ -25,13 +25,12 @@ final class KenariProvider: UsageProvider {
 
     func fetch() async -> ProviderSnapshot {
         var snap = ProviderSnapshot(id: id, name: displayName, systemImage: "cloud", windows: [], error: nil)
-        guard let cookie = login.loadCookie() else {
+        guard let cookie = await login.currentCookieHeader() else {
             return ClaudeProvider.demoSnapshot(id: id, name: displayName, systemImage: "cloud",
                                                note: L("Not signed in — Providers menu → Sign in to Kenari"))
         }
 
         guard let json = await Self.fetchSubscription(cookie: cookie) else {
-            login.clearCookie()
             snap.error = L("Session expired — sign in again from the Providers menu")
             return snap
         }

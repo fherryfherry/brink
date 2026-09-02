@@ -3,10 +3,10 @@ import Foundation
 /// Ollama Cloud has no documented usage/quota API (see
 /// github.com/ollama/ollama issues #16448, #15663) — the only place the
 /// numbers exist is the server-rendered `ollama.com/settings` page. This
-/// scrapes that page's HTML with the session cookie `login` (a `WebLogin`)
-/// captured. Fragile by nature: breaks if Ollama changes that page's markup,
-/// and there is no refresh-token dance, so an expired cookie just asks the
-/// user to sign in again.
+/// scrapes that page's HTML using the live session cookie from `login` (a
+/// `WebLogin`). Fragile by nature: breaks if Ollama changes that page's
+/// markup, and there is no refresh-token dance — if the WKWebView's own
+/// session has genuinely expired, this just asks the user to sign in again.
 final class OllamaProvider: UsageProvider {
     let id: String
     let displayName: String
@@ -33,14 +33,13 @@ final class OllamaProvider: UsageProvider {
 
     func fetch() async -> ProviderSnapshot {
         var snap = ProviderSnapshot(id: id, name: displayName, systemImage: "cloud", windows: [], error: nil)
-        guard let cookie = login.loadCookie() else {
+        guard let cookie = await login.currentCookieHeader() else {
             return ClaudeProvider.demoSnapshot(id: id, name: displayName, systemImage: "cloud",
                                                note: L("Not signed in — Providers menu → Sign in to Ollama"))
         }
 
         do {
             guard let html = try await Self.fetchSettingsHTML(cookie: cookie) else {
-                login.clearCookie()
                 snap.error = L("Session expired — sign in again from the Providers menu")
                 return snap
             }

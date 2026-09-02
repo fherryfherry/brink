@@ -3,15 +3,16 @@ import WebKit
 
 /// Presents a small in-app WKWebView so the user can sign in to a provider
 /// that has no API key / OAuth token flow Brink can read from disk (see
-/// `OllamaProvider`, `KenariProvider`). One instance per service — each gets
-/// its own captured session cookie, scoped to that service's domain, written
-/// to `~/Library/Application Support/Brink/<id>-cookie.json`.
+/// `OllamaProvider`, `KenariProvider`). One instance per service.
 ///
-/// The WKWebView uses Brink's own persistent data store, separate from — and
-/// never touching — the user's system Chrome/Safari cookies. There's no
-/// supported way to borrow another browser's live session without reading
-/// its cookie store wholesale, which is a much bigger permission than this
-/// needs.
+/// The WKWebView uses Brink's own persistent data store (`.default()`),
+/// separate from — and never touching — the user's system Chrome/Safari
+/// cookies. Cookies are read live from that store on every fetch rather than
+/// captured once into a file: a saved snapshot goes stale the moment the
+/// service rotates/refreshes the session cookie (a normal thing for a site
+/// to do), even though the live session in `.default()` is still perfectly
+/// valid — reading live instead means Brink is never more stale than the
+/// WKWebView itself.
 final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     let id: String
     let displayName: String
@@ -23,10 +24,10 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     /// actual form on a subdomain (e.g. `signin.ollama.com`) rather than a
     /// `/login`-ish path on the main domain.
     let signinHints: [String]
-    /// Confirms a cookie captured mid-flow is an actual signed-in session
-    /// before closing the window — a redirect landing back on the service's
-    /// domain mid-OAuth can carry only anonymous/tracking cookies, and
-    /// closing on that would strand the user mid-login.
+    /// Confirms a cookie header is an actual signed-in session before closing
+    /// the window — a redirect landing back on the service's domain mid-OAuth
+    /// can carry only anonymous/tracking cookies, and closing on that would
+    /// strand the user mid-login.
     let verify: (String) async -> Bool
 
     init(id: String, displayName: String, loginURL: URL, host: String,
@@ -45,32 +46,15 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private var isVerifying = false
     private var urlObservation: NSKeyValueObservation?
 
-    nonisolated private var cookieFileURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Brink", isDirectory: true)
-            .appendingPathComponent("\(id)-cookie.json")
-    }
-
-    nonisolated func loadCookie() -> String? {
-        guard let data = try? Data(contentsOf: cookieFileURL),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let cookie = obj["cookie"] as? String, !cookie.isEmpty else { return nil }
-        return cookie
-    }
-
-    nonisolated func clearCookie() {
-        try? FileManager.default.removeItem(at: cookieFileURL)
-    }
-
-    private func saveCookie(_ cookie: String) {
-        let dir = cookieFileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-        guard let data = try? JSONSerialization.data(withJSONObject: [
-            "cookie": cookie, "savedAt": Date().timeIntervalSince1970,
-        ]) else { return }
-        try? data.write(to: cookieFileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cookieFileURL.path)
+    /// The live cookie header for this service, straight from Brink's
+    /// persistent WKWebView data store — nil if there's currently no session
+    /// (never logged in, or it expired) rather than whatever was true the
+    /// last time someone happened to have the login window open.
+    func currentCookieHeader() async -> String? {
+        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        let relevant = cookies.filter { $0.domain.contains(host) }
+        guard !relevant.isEmpty else { return nil }
+        return relevant.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
     func presentLogin(onComplete: @escaping () -> Void) {
@@ -78,9 +62,6 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
         self.onComplete = onComplete
 
         let config = WKWebViewConfiguration()
-        // Persistent (not `.nonPersistent()`): Brink's own WKWebView storage, kept
-        // between launches, so signing in is a one-time thing — next time this
-        // opens (e.g. after the captured cookie expires) it's already logged in.
         config.websiteDataStore = .default()
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.navigationDelegate = self
@@ -139,22 +120,13 @@ final class WebLogin: NSObject, WKNavigationDelegate, NSWindowDelegate {
               !signinHints.contains(where: { url.host?.contains($0) == true || url.path.contains($0) }),
               !isVerifying else { return }
 
-        let host = self.host
-        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
-            let relevant = cookies.filter { $0.domain.contains(host) }
-            guard !relevant.isEmpty else { return }
-            let header = relevant.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-
-            guard let self, !self.isVerifying else { return }
-            self.isVerifying = true
-            Task { @MainActor in
-                let loggedIn = await self.verify(header)
-                self.isVerifying = false
-                guard loggedIn else { return }
-                self.saveCookie(header)
-                self.closeAndRestorePolicy()
-                self.onComplete?()
-            }
+        guard !isVerifying else { return }
+        isVerifying = true
+        Task { @MainActor in
+            defer { isVerifying = false }
+            guard let header = await currentCookieHeader(), await verify(header) else { return }
+            closeAndRestorePolicy()
+            onComplete?()
         }
     }
 }
