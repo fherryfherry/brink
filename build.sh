@@ -47,8 +47,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> Ad-hoc imzalanıyor..."
-codesign --force --sign - "$APP"
+echo "==> İmzalanıyor..."
+# A stable local identity, not ad-hoc (`-sign -`): ad-hoc signatures hash the
+# binary itself, so every rebuild gets a different identity and macOS treats
+# it as a new app for Keychain ACL purposes — re-prompting for "Allow" access
+# to Claude Code's credentials on every single build. Signing with the same
+# certificate every time keeps that grant valid across rebuilds.
+# One-time setup (already done for this checkout): a self-signed
+# "Brink Local Dev" code-signing cert imported into the login keychain.
+SIGN_IDENTITY="Brink Local Dev"
+if ! security find-identity -v -p codesigning | grep -q "$SIGN_IDENTITY"; then
+    echo "    (no '$SIGN_IDENTITY' identity found — falling back to ad-hoc, which re-prompts for Keychain access on every rebuild)"
+    SIGN_IDENTITY="-"
+fi
+codesign --force --sign "$SIGN_IDENTITY" "$APP"
 
 echo "==> DMG oluşturuluyor..."
 DMG_ROOT="$DIST/dmgroot"
