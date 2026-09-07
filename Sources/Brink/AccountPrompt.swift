@@ -8,7 +8,8 @@ enum AccountPrompt {
     static func text(title: String, message: String, placeholder: String = "") -> String? {
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
         field.placeholderString = placeholder
-        return run(title: title, message: message, accessory: field, confirmTitle: L("Add")) {
+        return run(title: title, message: message, accessory: field, confirmTitle: L("Add"),
+                   invalidMessage: L("This can't be blank.")) {
             let value = field.stringValue.trimmingCharacters(in: .whitespaces)
             return value.isEmpty ? nil : value
         }
@@ -33,7 +34,7 @@ enum AccountPrompt {
         stack.spacing = 10
 
         return run(title: title, message: message, accessory: stack, confirmTitle: L("Add"),
-                   firstResponder: field1) {
+                   firstResponder: field1, invalidMessage: L("%@ can't be blank.", label1)) {
             let v1 = field1.stringValue.trimmingCharacters(in: .whitespaces)
             let v2 = field2.stringValue.trimmingCharacters(in: .whitespaces)
             return v1.isEmpty ? nil : (v1, v2)
@@ -63,9 +64,13 @@ enum AccountPrompt {
         return stack
     }
 
+    /// Loops on an invalid confirm (e.g. a required field left blank) instead
+    /// of silently doing nothing — the field contents are preserved (same
+    /// NSAlert instance re-run) so the user isn't retyping everything.
     @MainActor
     private static func run<T>(title: String, message: String, accessory: NSView, confirmTitle: String,
-                               firstResponder: NSView? = nil, extract: () -> T?) -> T? {
+                               firstResponder: NSView? = nil, invalidMessage: String,
+                               extract: () -> T?) -> T? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -74,7 +79,14 @@ enum AccountPrompt {
         alert.accessoryView = accessory
         alert.window.initialFirstResponder = firstResponder ?? accessory
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return extract()
+        while true {
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+            if let value = extract() { return value }
+            let err = NSAlert()
+            err.messageText = invalidMessage
+            err.alertStyle = .warning
+            NSApp.activate(ignoringOtherApps: true)
+            err.runModal()
+        }
     }
 }
