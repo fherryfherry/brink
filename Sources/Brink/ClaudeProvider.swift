@@ -242,8 +242,7 @@ final class ClaudeProvider: UsageProvider {
     ///  1) In-memory cache (no I/O while the app is running)
     ///  2) Brink's own cache of the access token (written after a successful read)
     ///  3) ~/<credentialsDir>/.credentials.json (file store used by Claude Code on some setups)
-    ///  4) `keychainService` — this is what triggers the macOS prompt. Clicking
-    ///     "Always Allow" makes it silent afterwards.
+    ///  4) `keychainService` via /usr/bin/security (silent), with SecItem as a prompting fallback.
     /// Expired tokens are discarded so Claude Code's fresher copy is picked up.
     func loadCredentials() -> Credentials? {
         if let cached = memoryCache, !cached.isExpired { return cached }
@@ -320,7 +319,28 @@ final class ClaudeProvider: UsageProvider {
         return Credentials(accessToken: token, expiresAt: expires)
     }
 
+    /// Claude Code writes its item via /usr/bin/security, so that tool is on the item's ACL and reads without a prompt.
     static func keychainData(service: String) -> Data? {
+        securityCLIData(service: service) ?? secItemData(service: service)
+    }
+
+    static func securityCLIData(service: String) -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let trimmed = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : Data(trimmed.utf8)
+    }
+
+    /// Fallback only: Claude Code rewrites the item on every token refresh, which resets any "Always Allow" granted to Brink.
+    static func secItemData(service: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
