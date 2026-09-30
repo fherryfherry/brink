@@ -6,39 +6,56 @@ import AppKit
 enum AccountPrompt {
     @MainActor
     static func text(title: String, message: String, placeholder: String = "") -> String? {
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: fieldWidth, height: 22))
         field.placeholderString = placeholder
-        return run(title: title, message: message, accessory: field, confirmTitle: L("Add"),
-                   invalidMessage: L("This can't be blank.")) {
+        return run(title: title, message: message, accessory: field, confirmTitle: L("Add")) {
             let value = field.stringValue.trimmingCharacters(in: .whitespaces)
-            return value.isEmpty ? nil : value
+            return value.isEmpty ? .failure(Invalid(L("This can't be blank."))) : .success(value)
         }
     }
 
-    /// Two labeled fields stacked vertically — used for Claude/Codex, which
-    /// need both a display name and a config-dir folder name.
+    /// Display name + config folder for Claude/Codex; the folder comes back normalized relative to ~ (nil if left blank and optional).
     @MainActor
-    static func twoFields(title: String, message: String,
-                          label1: String, placeholder1: String,
-                          label2: String, placeholder2: String) -> (String, String)? {
+    static func nameAndFolder(title: String, message: String,
+                              label1: String, placeholder1: String,
+                              label2: String, placeholder2: String,
+                              folderRequired: Bool) -> (String, String?)? {
         let field1 = NSTextField(string: "")
         field1.placeholderString = placeholder1
-        field1.widthAnchor.constraint(equalToConstant: 260).isActive = true
         let field2 = NSTextField(string: "")
         field2.placeholderString = placeholder2
-        field2.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        field1.nextKeyView = field2
+        let form = labeledFields([(label1, field1), (label2, field2)])
 
-        let stack = NSStackView(views: [labeled(label1, field1), labeled(label2, field2)])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-
-        return run(title: title, message: message, accessory: stack, confirmTitle: L("Add"),
-                   firstResponder: field1, invalidMessage: L("%@ can't be blank.", label1)) {
-            let v1 = field1.stringValue.trimmingCharacters(in: .whitespaces)
-            let v2 = field2.stringValue.trimmingCharacters(in: .whitespaces)
-            return v1.isEmpty ? nil : (v1, v2)
+        return run(title: title, message: message, accessory: form, confirmTitle: L("Add"),
+                   firstResponder: field1) {
+            let name = field1.stringValue.trimmingCharacters(in: .whitespaces)
+            let rawDir = field2.stringValue.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { return .failure(Invalid(L("%@ can't be blank.", label1))) }
+            if rawDir.isEmpty {
+                return folderRequired ? .failure(Invalid(L("%@ can't be blank.", label2))) : .success((name, nil))
+            }
+            guard let dir = homeRelativeFolder(rawDir) else {
+                return .failure(Invalid(L("%@ must be a folder inside your home directory.", rawDir)))
+            }
+            var isDir: ObjCBool = false
+            let full = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(dir).path
+            guard FileManager.default.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue else {
+                return .failure(Invalid(L("Folder ~/%@ doesn't exist.", dir)))
+            }
+            return .success((name, dir))
         }
+    }
+
+    /// Accepts ".claude-work", "~/.claude-work" or "/Users/me/.claude-work" and returns ".claude-work"; nil if outside ~.
+    static func homeRelativeFolder(_ input: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let expanded = (input as NSString).expandingTildeInPath
+        let absolute = expanded.hasPrefix("/") ? expanded : (home as NSString).appendingPathComponent(expanded)
+        let path = URL(fileURLWithPath: absolute).standardizedFileURL.path
+        guard path.hasPrefix(home + "/") else { return nil }
+        let relative = String(path.dropFirst(home.count + 1))
+        return relative.isEmpty ? nil : relative
     }
 
     @MainActor
@@ -53,15 +70,30 @@ enum AccountPrompt {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    private static func labeled(_ text: String, _ field: NSView) -> NSView {
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [label, field])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 2
-        return stack
+    static let fieldWidth: CGFloat = 220
+
+    /// Frame-based on purpose: NSAlert's accessoryView needs a real frame, an Auto Layout stack gets misplaced over the message text.
+    private static func labeledFields(_ rows: [(String, NSTextField)]) -> NSView {
+        let labelH: CGFloat = 16, fieldH: CGFloat = 22, gap: CGFloat = 2, rowGap: CGFloat = 10
+        let rowH = labelH + gap + fieldH
+        let totalH = CGFloat(rows.count) * rowH + CGFloat(rows.count - 1) * rowGap
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: fieldWidth, height: totalH))
+        for (i, (text, field)) in rows.enumerated() {
+            let top = totalH - CGFloat(i) * (rowH + rowGap)
+            let label = NSTextField(labelWithString: text)
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            label.frame = NSRect(x: 0, y: top - labelH, width: fieldWidth, height: labelH)
+            field.frame = NSRect(x: 0, y: top - labelH - gap - fieldH, width: fieldWidth, height: fieldH)
+            container.addSubview(label)
+            container.addSubview(field)
+        }
+        return container
+    }
+
+    struct Invalid: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
     }
 
     /// Loops on an invalid confirm (e.g. a required field left blank) instead
@@ -69,8 +101,8 @@ enum AccountPrompt {
     /// NSAlert instance re-run) so the user isn't retyping everything.
     @MainActor
     private static func run<T>(title: String, message: String, accessory: NSView, confirmTitle: String,
-                               firstResponder: NSView? = nil, invalidMessage: String,
-                               extract: () -> T?) -> T? {
+                               firstResponder: NSView? = nil,
+                               extract: () -> Result<T, Invalid>) -> T? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
@@ -81,9 +113,13 @@ enum AccountPrompt {
         NSApp.activate(ignoringOtherApps: true)
         while true {
             guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-            if let value = extract() { return value }
+            let invalid: Invalid
+            switch extract() {
+            case .success(let value): return value
+            case .failure(let error): invalid = error
+            }
             let err = NSAlert()
-            err.messageText = invalidMessage
+            err.messageText = invalid.message
             err.alertStyle = .warning
             NSApp.activate(ignoringOtherApps: true)
             err.runModal()

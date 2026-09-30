@@ -337,23 +337,25 @@ struct SettingsMenuItems: View {
     // MARK: Add / remove accounts
 
     private func addClaude() {
-        guard let (name, dir) = AccountPrompt.twoFields(
+        guard let (name, dir) = AccountPrompt.nameAndFolder(
             title: L("Add Claude account"),
             message: L("The config folder must already exist under your home directory (this is what CLAUDE_CONFIG_DIR points Claude Code at for that profile)."),
             label1: L("Display name"), placeholder1: "Claude (personal)",
-            label2: L("Config folder (under ~)"), placeholder2: ".claude-personal"
+            label2: L("Config folder (under ~)"), placeholder2: ".claude-personal",
+            folderRequired: true
         ) else { return }
-        accountStore.add(kind: .claude, displayName: name, configDir: dir.isEmpty ? nil : dir)
+        accountStore.add(kind: .claude, displayName: name, configDir: dir)
     }
 
     private func addCodex() {
-        guard let (name, dir) = AccountPrompt.twoFields(
+        guard let (name, dir) = AccountPrompt.nameAndFolder(
             title: L("Add Codex account"),
             message: L("The config folder must already exist under your home directory (this is what CODEX_HOME points Codex CLI at for that profile). Leave blank for the default ~/.codex."),
             label1: L("Display name"), placeholder1: "Codex (personal)",
-            label2: L("Config folder (under ~), optional"), placeholder2: ".codex-personal"
+            label2: L("Config folder (under ~), optional"), placeholder2: ".codex-personal",
+            folderRequired: false
         ) else { return }
-        accountStore.add(kind: .codex, displayName: name, configDir: dir.isEmpty ? nil : dir)
+        accountStore.add(kind: .codex, displayName: name, configDir: dir)
     }
 
     private func addOllama() {
