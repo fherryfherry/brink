@@ -9,7 +9,9 @@ struct UsageWindow: Identifiable {
     var label: String            // "Current session", "All models (weekly)"...
     var usedPercent: Double      // 0...100
     var resetsAt: Date?
+    var valueText: String? = nil // shown instead of a percent for non-quota windows, e.g. a "$2.99" balance
 
+    var isBalance: Bool { valueText != nil }
     var fraction: Double { min(max(usedPercent / 100.0, 0), 1) }
 
     var resetText: String? {
@@ -99,6 +101,7 @@ final class UsageStore: ObservableObject {
         switch providers.first(where: { $0.id == id }) {
         case let p as OllamaProvider: return p.login
         case let p as KenariProvider: return p.login
+        case let p as SumopodProvider: return p.login
         default: return nil
         }
     }
@@ -136,9 +139,12 @@ final class UsageStore: ObservableObject {
         refresh(ids: Set(providers.map(\.id)))
     }
 
-    private func refresh(ids: Set<String>) {
+    private func refresh(ids requested: Set<String>) {
+        // Skip ids already mid-fetch, e.g. launch's initial build and the timer's first tick firing together.
+        let ids = requested.subtracting(refreshingIDs)
+        guard !ids.isEmpty else { return }
+        refreshingIDs.formUnion(ids)
         Task {
-            refreshingIDs.formUnion(ids)
             // Sequential, not parallel: providers share rate-limited endpoints
             // (see ClaudeProvider's 429 backoff), so fetching them all at once
             // would just make that worse. Updating the store as each one

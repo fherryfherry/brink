@@ -72,7 +72,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let now = Date()
         let hidden = Set(UserDefaults.standard.stringArray(forKey: "hiddenProviders") ?? [])
         for snap in snapshots where !snap.isDemo && !hidden.contains(snap.id) {
-            for window in snap.windows {
+            for window in snap.windows where !window.isBalance {
                 let key = "\(snap.id)|\(window.label)"
                 let isFull = window.usedPercent >= 99.5
                     && (window.resetsAt.map { $0 > now } ?? true)

@@ -129,9 +129,9 @@ struct ProviderIcon: View {
         return dict
     }()
 
-    // Multiple accounts for the same CLI (e.g. "claude-work") share that CLI's logo/glyph.
+    // Account ids are "<kind>" or "<kind>-<suffix>", so every account of a kind shares its logo.
     private var logoKey: String {
-        id.hasPrefix("claude") ? "claude" : (id.hasPrefix("codex") ? "codex" : id)
+        String(id.prefix(while: { $0 != "-" }))
     }
 
     var body: some View {
@@ -149,6 +149,8 @@ struct ProviderIcon: View {
                     ClaudeIcon().stroke(color, style: StrokeStyle(lineWidth: size * 0.1, lineCap: .round))
                 case "codex":
                     CodexIcon().stroke(color, style: StrokeStyle(lineWidth: size * 0.08, lineCap: .round, lineJoin: .round))
+                case "sumopod":
+                    Image(systemName: "dollarsign.circle").font(.system(size: size * 0.85, weight: .semibold)).foregroundColor(color)
                 default:
                     Image(systemName: "sparkle").font(.system(size: size * 0.8, weight: .semibold)).foregroundColor(color)
                 }
@@ -192,7 +194,15 @@ struct UsageRing: View {
     private var hasError: Bool { snapshot.error != nil && !snapshot.isDemo }
     // While refreshing, spin a short arc of the ring's own color instead of a
     // separate loading element; the real percent arc reappears once it lands.
-    private var arcEnd: Double { isRefreshing ? 0.22 : (hasData ? (snapshot.primary?.fraction ?? 0) : 0) }
+    private var arcEnd: Double {
+        if isRefreshing { return 0.22 }
+        guard hasData, let primary = snapshot.primary else { return 0 }
+        return primary.isBalance ? 1 : primary.fraction
+    }
+    private var label: String {
+        guard hasData else { return "--" }
+        return snapshot.primary?.valueText ?? "\(Int(percent.rounded()))%"
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -224,9 +234,11 @@ struct UsageRing: View {
                 }
             }
 
-            Text(hasData ? "\(Int(percent.rounded()))%" : "--")
+            Text(label)
                 .font(.system(size: 13.5, weight: .semibold))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .foregroundColor(palette.fg)
         }
         .frame(height: Layout.ringBlockHeight)
@@ -295,7 +307,7 @@ struct SettingsMenuItems: View {
             }
         }
         Menu(L("Accounts")) {
-            ForEach(accountStore.accounts.filter { $0.kind == .ollama || $0.kind == .kenari }) { account in
+            ForEach(accountStore.accounts.filter { [.ollama, .kenari, .sumopod].contains($0.kind) }) { account in
                 Button(L("Sign in to %@", account.displayName)) {
                     store.webLogin(for: account.id)?.presentLogin { store.refreshAll() }
                 }
@@ -306,6 +318,7 @@ struct SettingsMenuItems: View {
                 Button(L("Codex…")) { addCodex() }
                 Button(L("Ollama…")) { addOllama() }
                 Button(L("Kenari…")) { addKenari() }
+                Button(L("Sumopod AI…")) { addSumopod() }
             }
             Menu(L("Remove account")) {
                 ForEach(accountStore.accounts) { account in
@@ -373,6 +386,15 @@ struct SettingsMenuItems: View {
             placeholder: "Kenari"
         ) else { return }
         let config = accountStore.add(kind: .kenari, displayName: name, configDir: nil)
+        store.webLogin(for: config.id)?.presentLogin { store.refreshAll() }
+    }
+
+    private func addSumopod() {
+        guard let name = AccountPrompt.text(
+            title: L("Add Sumopod AI account"), message: L("A display name for this account."),
+            placeholder: "Sumopod AI"
+        ) else { return }
+        let config = accountStore.add(kind: .sumopod, displayName: name, configDir: nil)
         store.webLogin(for: config.id)?.presentLogin { store.refreshAll() }
     }
 
@@ -499,34 +521,48 @@ struct DetailCardContent: View {
                     .foregroundColor(palette.muted)
             } else {
                 ForEach(Array(snapshot.windows.enumerated()), id: \.element.id) { idx, window in
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(L(window.label))
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundColor(palette.fg)
-                        Spacer()
-                        if let reset = window.resetText {
-                            Text(reset)
-                                .font(.system(size: 10.5))
-                                .foregroundColor(palette.muted)
+                    if let value = window.valueText {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(L(window.label))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(palette.fg)
+                            Spacer()
+                            Text(value)
+                                .font(.system(size: 15, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundColor(UsageColor.color(for: snapshot, percent: window.usedPercent))
                         }
-                    }
-                    .padding(.bottom, 6)
-
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 4).fill(palette.barTrack)
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(UsageColor.color(for: snapshot, percent: window.usedPercent))
-                                .frame(width: max(7, geo.size.width * window.fraction))
-                        }
-                    }
-                    .frame(height: 4.5)
-                    .padding(.bottom, 5.5)
-
-                    Text(L("%d%% Used", Int(window.usedPercent.rounded())))
-                        .font(.system(size: 10.5))
-                        .foregroundColor(palette.soft)
                         .padding(.bottom, idx == snapshot.windows.count - 1 ? 0 : 12)
+                    } else {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(L(window.label))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(palette.fg)
+                            Spacer()
+                            if let reset = window.resetText {
+                                Text(reset)
+                                    .font(.system(size: 10.5))
+                                    .foregroundColor(palette.muted)
+                            }
+                        }
+                        .padding(.bottom, 6)
+
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4).fill(palette.barTrack)
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(UsageColor.color(for: snapshot, percent: window.usedPercent))
+                                    .frame(width: max(7, geo.size.width * window.fraction))
+                            }
+                        }
+                        .frame(height: 4.5)
+                        .padding(.bottom, 5.5)
+
+                        Text(L("%d%% Used", Int(window.usedPercent.rounded())))
+                            .font(.system(size: 10.5))
+                            .foregroundColor(palette.soft)
+                            .padding(.bottom, idx == snapshot.windows.count - 1 ? 0 : 12)
+                    }
                 }
             }
 
