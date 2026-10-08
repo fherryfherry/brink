@@ -5,6 +5,11 @@ import Combine
 @MainActor
 final class PanelState: ObservableObject {
     @Published var isExpanded = false
+    @Published var notchWidth: CGFloat = 0   // notch mode: gap left between the two wings
+    @Published var barHeight: CGFloat = 0    // notch mode: height of the bar (notch / menu bar)
+    @Published var notchCollapsed = CGRect.zero   // notch mode: compact bar, screen coords
+    @Published var notchExpanded = CGRect.zero    // notch mode: dropped-down panel, screen coords
+    @Published var windowMinX: CGFloat = 0        // notch mode: panel's left edge, to place the rects
 }
 
 /// Owns the borderless edge panel and the detail-bubble panel.
@@ -33,22 +38,34 @@ final class PanelController {
     private var detailHovered = false
     private var menuOpen = false
     private var visibilityObserver: AnyCancellable?
+    private var placementObserver: AnyCancellable?
+    private var screenObserver: NSObjectProtocol?
     private var menuObservers: [NSObjectProtocol] = []
+
+    private var isNotch: Bool { themeStore.placement == .notch }
 
     init(store: UsageStore, themeStore: ThemeStore) {
         self.store = store
         self.themeStore = themeStore
         makeMainPanel()
         makeDetailPanel()
-        positionPanel(expanded: false)
+        applyPlacement()
         panel.orderFrontRegardless()
         installFarAwayCollapse()
         installMenuTrackingGuard()
         visibilityObserver = themeStore.$hiddenProviders.sink { [weak self] _ in
+            Task { @MainActor [weak self] in self?.layout() }
+        }
+        placementObserver = themeStore.$placement.dropFirst().sink { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.positionPanel(expanded: self.state.isExpanded)
+                self?.hideDetail()
+                self?.applyPlacement()
             }
+        }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.layout() }
         }
 
         // BRINK_PREVIEW=1 → start expanded with the first card open (screenshots / design review).
@@ -61,7 +78,7 @@ final class PanelController {
                 let n = self.store.snapshots.count
                 let y = 12 + Layout.tabPadding + Layout.ringBlockHeight / 2
                 _ = n
-                self.showDetail(for: first.id, ringCenterY: y)
+                self.showDetail(for: first.id, ringCenter: y)
             }
         }
     }
@@ -79,8 +96,8 @@ final class PanelController {
                 self?.panelHovered = inside
                 self?.hoverChanged()
             },
-            onRingHover: { [weak self] id, centerY in
-                self?.showDetail(for: id, ringCenterY: centerY)
+            onRingHover: { [weak self] id, center in
+                self?.showDetail(for: id, ringCenter: center)
             }
         )
         let host = NSHostingView(rootView: root)
@@ -117,10 +134,61 @@ final class PanelController {
 
     // MARK: Geometry
 
-    private var screen: NSScreen? { NSScreen.main ?? NSScreen.screens.first }
+    private var edgeScreen: NSScreen? { NSScreen.main ?? NSScreen.screens.first }
+
+    /// The built-in notched display if there is one, otherwise the menu-bar screen.
+    private var notchScreen: NSScreen? {
+        NSScreen.screens.first { $0.auxiliaryTopLeftArea != nil } ?? NSScreen.screens.first
+    }
+
+    private var screen: NSScreen? { isNotch ? notchScreen : edgeScreen }
+
+    /// Width and height of the notch, or a fake notch-sized gap on screens without one.
+    private func notchMetrics(_ screen: NSScreen) -> (width: CGFloat, height: CGFloat) {
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            return (screen.frame.width - left.width - right.width, screen.safeAreaInsets.top)
+        }
+        return (Layout.notchFallbackWidth, max(screen.frame.maxY - screen.visibleFrame.maxY, 24))
+    }
 
     private var panelHeight: CGFloat {
         max(Layout.tabHeight(providers: themeStore.visible(store.snapshots).count), Layout.stripHeight) + 24
+    }
+
+    private func applyPlacement() {
+        let level: NSWindow.Level = isNotch ? .init(NSWindow.Level.mainMenu.rawValue + 1) : .statusBar
+        panel.level = level
+        detailPanel.level = level
+        collapseTask?.cancel()
+        state.isExpanded = false
+        layout()
+    }
+
+    private func layout() {
+        if isNotch { positionNotch(expanded: state.isExpanded) } else { positionPanel(expanded: state.isExpanded) }
+    }
+
+    /// Expanded, the window covers both the compact bar and the dropped-down panel so the shape can morph between them.
+    private func positionNotch(expanded: Bool) {
+        guard let screen else { return }
+        let (notchWidth, h) = notchMetrics(screen)
+        let visible = themeStore.visible(store.snapshots)
+        let wings = Layout.splitWings(visible)
+        let left = Layout.wingWidth(rings: wings.left.count, barHeight: h)
+        let right = Layout.wingWidth(rings: wings.right.count, barHeight: h)
+        let top = screen.frame.maxY
+        let collapsed = CGRect(x: screen.frame.midX - notchWidth / 2 - left, y: top - h,
+                               width: left + notchWidth + right, height: h)
+        let size = Layout.notchExpandedSize(rings: visible.count, barHeight: h, minWidth: notchWidth)
+        let dropped = CGRect(x: screen.frame.midX - size.width / 2, y: top - size.height,
+                             width: size.width, height: size.height)
+        let frame = expanded ? collapsed.union(dropped) : collapsed
+        state.notchWidth = notchWidth
+        state.barHeight = h
+        state.notchCollapsed = collapsed
+        state.notchExpanded = dropped
+        state.windowMinX = frame.minX
+        panel.setFrame(frame, display: true, animate: false)
     }
 
     private func positionPanel(expanded: Bool) {
@@ -149,7 +217,10 @@ final class PanelController {
             MainActor.assumeIsolated {
                 guard let self, self.state.isExpanded, !self.menuOpen, !Self.collapseSuspended,
                       let screen = self.screen else { return }
-                if NSEvent.mouseLocation.x < screen.frame.maxX - self.farAwayDistance {
+                let mouse = NSEvent.mouseLocation
+                let far = self.isNotch ? mouse.y < self.panel.frame.minY - self.farAwayDistance / 2
+                                       : mouse.x < screen.frame.maxX - self.farAwayDistance
+                if far {
                     self.panelHovered = false
                     self.detailHovered = false
                     self.scheduleCollapse()
@@ -201,8 +272,17 @@ final class PanelController {
     }
 
     private func expand() {
-        positionPanel(expanded: true)
-        state.isExpanded = true
+        guard isNotch else {
+            positionPanel(expanded: true)
+            state.isExpanded = true
+            return
+        }
+        // Grow the window first, then morph next runloop so the frame jump isn't animated.
+        positionNotch(expanded: true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panelHovered || self.detailHovered || self.menuOpen else { return }
+            self.state.isExpanded = true
+        }
     }
 
     private func scheduleCollapse() {
@@ -215,16 +295,16 @@ final class PanelController {
             self.hideDetail()
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, !self.state.isExpanded else { return }
-            self.positionPanel(expanded: false)
+            self.layout()
         }
     }
 
     // MARK: Detail bubble
 
-    private func showDetail(for id: String, ringCenterY: CGFloat) {
+    /// `ringCenter` is the ring's centre along the bar: y in edge mode, x in notch mode (window coords).
+    private func showDetail(for id: String, ringCenter: CGFloat) {
         guard let snap = store.snapshots.first(where: { $0.id == id }), let screen else { return }
         let panelFrame = panel.frame
-        let ringScreenY = panelFrame.maxY - ringCenterY   // SwiftUI global y is top-down
 
         // Measure the card for this snapshot.
         let probe = NSHostingView(rootView:
@@ -233,6 +313,48 @@ final class PanelController {
                 .frame(width: Layout.cardWidth)
         )
         let cardHeight = max(probe.fittingSize.height, 100)
+        let frame: NSRect
+        if isNotch {
+            // Card hangs below the bar, centred on the ring, clamped to the screen.
+            let ringScreenX = panelFrame.minX + ringCenter
+            var cardX = ringScreenX - Layout.cardWidth / 2
+            cardX = min(max(cardX, screen.frame.minX + 10), screen.frame.maxX - 10 - Layout.cardWidth)
+            let tailX = min(max(ringScreenX - cardX, 20), Layout.cardWidth - 20)
+            let winW = Layout.cardWidth + Layout.shadowPad * 2
+            let winH = cardHeight + Layout.tailRoom + Layout.shadowPad * 2
+            let top = panelFrame.minY - 2 + Layout.shadowPad
+            frame = NSRect(x: cardX - Layout.shadowPad, y: top - winH, width: winW, height: winH)
+            detail.tailOnTop = true
+            detail.tailX = tailX
+        } else {
+            frame = edgeDetailFrame(screen: screen, ringScreenY: panelFrame.maxY - ringCenter, cardHeight: cardHeight)
+            detail.tailOnTop = false
+        }
+
+        let wasVisible = detail.visible
+        let sameProvider = detail.snapshot?.id == id
+        detail.snapshot = snap
+
+        if !wasVisible {
+            // Fresh open: place instantly, then pop in.
+            detailPanel.setFrame(frame, display: true, animate: false)
+            detailPanel.orderFrontRegardless()
+            // The card's shadow margin overlaps the notch bar; keep the bar on top so its rings stay hoverable.
+            if isNotch { panel.orderFrontRegardless() }
+            DispatchQueue.main.async { self.detail.visible = true }
+        } else if !sameProvider || abs(detailPanel.frame.midY - frame.midY) > 0.5
+                    || abs(detailPanel.frame.midX - frame.midX) > 0.5 {
+            // Already open: glide to the new ring (content crossfades via SwiftUI).
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.40
+                ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.30, 0.90, 0.25, 1)
+                self.detailPanel.animator().setFrame(frame, display: true)
+            }
+        }
+    }
+
+    /// Card to the left of the edge tab, its tail centred on the ring; also sets `detail.tailY`.
+    private func edgeDetailFrame(screen: NSScreen, ringScreenY: CGFloat, cardHeight: CGFloat) -> NSRect {
         let winW = Layout.cardWidth + Layout.tailRoom + Layout.shadowPad * 2
         let winH = cardHeight + Layout.shadowPad * 2
 
@@ -245,29 +367,8 @@ final class PanelController {
         tailY = min(max(tailY, 20), cardHeight - 20)
 
         let x = screen.frame.maxX - Layout.tabWidth - 12 - Layout.tailWidth - Layout.cardWidth - Layout.shadowPad
-        let frame = NSRect(x: x, y: cardTopY + Layout.shadowPad - winH, width: winW, height: winH)
-
-        let wasVisible = detail.visible
-        let sameProvider = detail.snapshot?.id == id
-        detail.snapshot = snap
-
-        if !wasVisible {
-            // Fresh open: place instantly, then pop in.
-            detail.tailY = tailY
-            detailPanel.setFrame(frame, display: true, animate: false)
-            detailPanel.orderFrontRegardless()
-            DispatchQueue.main.async { self.detail.visible = true }
-        } else {
-            // Already open: glide to the new ring (content crossfades via SwiftUI).
-            if !sameProvider || abs(detailPanel.frame.midY - frame.midY) > 0.5 {
-                detail.tailY = tailY
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.40
-                    ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.30, 0.90, 0.25, 1)
-                    self.detailPanel.animator().setFrame(frame, display: true)
-                }
-            }
-        }
+        detail.tailY = tailY
+        return NSRect(x: x, y: cardTopY + Layout.shadowPad - winH, width: winW, height: winH)
     }
 
     private func hideDetail() {

@@ -17,12 +17,32 @@ enum Theme: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Panel placement (persisted)
+
+enum Placement: String, CaseIterable, Identifiable {
+    case edge, notch
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .edge: return L("Right edge")
+        case .notch: return L("Notch")
+        }
+    }
+}
+
 @MainActor
 final class ThemeStore: ObservableObject {
     private static let key = "theme"
+    private static let placementKey = "placement"
 
     @Published var theme: Theme {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: Self.key) }
+    }
+
+    @Published var placement: Placement {
+        didSet { UserDefaults.standard.set(placement.rawValue, forKey: Self.placementKey) }
     }
 
     /// "" = system default; otherwise a code from L10n.available. Changing it
@@ -55,6 +75,7 @@ final class ThemeStore: ObservableObject {
 
     init() {
         theme = Theme(rawValue: UserDefaults.standard.string(forKey: Self.key) ?? "") ?? .black
+        placement = Placement(rawValue: UserDefaults.standard.string(forKey: Self.placementKey) ?? "") ?? .edge
     }
 }
 

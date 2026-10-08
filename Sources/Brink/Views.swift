@@ -26,6 +26,37 @@ enum Layout {
     static func tabHeight(providers n: Int) -> CGFloat {
         tabPadding * 2 + CGFloat(n) * ringBlockHeight + CGFloat(max(n - 1, 0)) * ringGap
     }
+
+    // Notch mode: compact rings flanking the (real or fake) notch.
+    static let notchFallbackWidth: CGFloat = 180
+    static let notchRadius: CGFloat = 9
+    static let compactLabelWidth: CGFloat = 38
+    static let compactGap: CGFloat = 10
+    static let wingPadding: CGFloat = 12
+
+    static let droppedRingSlot: CGFloat = 56
+    static let droppedPadding: CGFloat = 18
+    static let droppedRadius: CGFloat = 22
+    static let droppedGap: CGFloat = 12
+
+    static func notchExpandedSize(rings n: Int, barHeight h: CGFloat, minWidth: CGFloat) -> CGSize {
+        let rings = droppedPadding * 2 + CGFloat(n) * droppedRingSlot + CGFloat(max(n - 1, 0)) * droppedGap
+        return CGSize(width: max(rings, minWidth), height: h + 10 + ringBlockHeight + droppedPadding)
+    }
+
+    static func compactRingSize(barHeight h: CGFloat) -> CGFloat { min(22, max(h - 8, 14)) }
+
+    static func wingWidth(rings n: Int, barHeight h: CGFloat) -> CGFloat {
+        guard n > 0 else { return 0 }
+        let block = compactRingSize(barHeight: h) + 4 + compactLabelWidth
+        return wingPadding * 2 + CGFloat(n) * block + CGFloat(n - 1) * compactGap
+    }
+
+    /// Splits visible providers into the rings left and right of the notch.
+    static func splitWings<T>(_ items: [T]) -> (left: [T], right: [T]) {
+        let leftCount = (items.count + 1) / 2
+        return (Array(items.prefix(leftCount)), Array(items.dropFirst(leftCount)))
+    }
 }
 
 // MARK: - Shapes
@@ -52,13 +83,37 @@ struct NotchTabShape: Shape {
     }
 }
 
-/// Arrow tail pointing right (mockup v3: `polygon(0 0, 100% 50%, 0 100%)`).
+/// Arrow tail pointing right (mockup v3: `polygon(0 0, 100% 50%, 0 100%)`), or up in notch mode.
 struct ArrowTailShape: Shape {
+    var up = false
     func path(in rect: CGRect) -> Path {
         var p = Path()
+        if up {
+            p.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+            p.addLine(to: CGPoint(x: rect.midX, y: rect.minY))
+            p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        } else {
+            p.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+            p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        }
+        p.closeSubpath()
+        return p
+    }
+}
+
+/// Flat top, rounded bottom corners: the black bar that extends the notch sideways.
+struct NotchWingShape: Shape {
+    var radius: CGFloat
+    func path(in rect: CGRect) -> Path {
+        let r = min(radius, rect.height / 2, rect.width / 2)
+        var p = Path()
         p.move(to: CGPoint(x: rect.minX, y: rect.minY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
-        p.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - r))
+        p.addQuadCurve(to: CGPoint(x: rect.maxX - r, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        p.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
+        p.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - r), control: CGPoint(x: rect.minX, y: rect.maxY))
         p.closeSubpath()
         return p
     }
@@ -179,14 +234,25 @@ extension View {
 
 // MARK: - Usage ring
 
-struct UsageRing: View {
+extension ProviderSnapshot {
+    var ringPercent: Double { primary?.usedPercent ?? 0 }
+    var ringLabel: String {
+        guard !windows.isEmpty else { return "--" }
+        return primary?.valueText ?? "\(Int(ringPercent.rounded()))%"
+    }
+}
+
+/// The ring itself (track, usage arc, refresh spin, error badge), shared by both placements.
+struct RingArc: View {
     let snapshot: ProviderSnapshot
     let palette: Palette
     let isRefreshing: Bool
-    @State private var hovering = false
+    var size: CGFloat
+    var lineWidth: CGFloat
+    var iconSize: CGFloat
     @State private var spin = false
 
-    private var percent: Double { snapshot.primary?.usedPercent ?? 0 }
+    private var percent: Double { snapshot.ringPercent }
     private var hasData: Bool { !snapshot.windows.isEmpty }
     // Demo (not signed in yet) always carries a note in `error` — that's not
     // a failed refresh, it's an expected "not configured" state with its own
@@ -199,42 +265,50 @@ struct UsageRing: View {
         guard hasData, let primary = snapshot.primary else { return 0 }
         return primary.isBalance ? 1 : primary.fraction
     }
-    private var label: String {
-        guard hasData else { return "--" }
-        return snapshot.primary?.valueText ?? "\(Int(percent.rounded()))%"
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(palette.track, lineWidth: lineWidth)
+            Circle()
+                .trim(from: 0, to: arcEnd)
+                .stroke(UsageColor.color(for: snapshot, percent: percent),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .rotationEffect(.degrees(spin ? 360 : 0))
+                .animation(.easeOut(duration: 0.6), value: percent)
+                .animation(spin ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .easeOut(duration: 0.3),
+                           value: spin)
+                .onChange(of: isRefreshing) { spin = $0 }
+            ProviderIcon(id: snapshot.id, size: iconSize, color: palette.fg)
+        }
+        .frame(width: size, height: size)
+        .opacity(hasData ? 1 : 0.35)
+        .overlay(alignment: .topTrailing) {
+            if hasError && !isRefreshing {
+                Circle()
+                    .fill(Color.red)
+                    .overlay(Circle().stroke(.black.opacity(0.25), lineWidth: 1))
+                    .frame(width: 7, height: 7)
+                    .offset(x: 1, y: -1)
+            }
+        }
     }
+}
+
+struct UsageRing: View {
+    let snapshot: ProviderSnapshot
+    let palette: Palette
+    let isRefreshing: Bool
+    @State private var hovering = false
 
     var body: some View {
         VStack(spacing: 6) {
-            ZStack {
-                Circle().stroke(palette.track, lineWidth: 5)
-                Circle()
-                    .trim(from: 0, to: arcEnd)
-                    .stroke(UsageColor.color(for: snapshot, percent: percent),
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-                    .animation(.easeOut(duration: 0.6), value: percent)
-                    .animation(spin ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .easeOut(duration: 0.3),
-                               value: spin)
-                    .onChange(of: isRefreshing) { spin = $0 }
-                ProviderIcon(id: snapshot.id, size: 18, color: palette.fg)
-            }
-            .frame(width: Layout.ringSize, height: Layout.ringSize)
-            .scaleEffect(hovering ? 1.08 : 1)
-            .animation(.spring(response: 0.28, dampingFraction: 0.55), value: hovering)
-            .opacity(hasData ? 1 : 0.35)
-            .overlay(alignment: .topTrailing) {
-                if hasError && !isRefreshing {
-                    Circle()
-                        .fill(Color.red)
-                        .overlay(Circle().stroke(.black.opacity(0.25), lineWidth: 1))
-                        .frame(width: 7, height: 7)
-                        .offset(x: 1, y: -1)
-                }
-            }
+            RingArc(snapshot: snapshot, palette: palette, isRefreshing: isRefreshing,
+                    size: Layout.ringSize, lineWidth: 5, iconSize: 18)
+                .scaleEffect(hovering ? 1.08 : 1)
+                .animation(.spring(response: 0.28, dampingFraction: 0.55), value: hovering)
 
-            Text(label)
+            Text(snapshot.ringLabel)
                 .font(.system(size: 13.5, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -243,6 +317,33 @@ struct UsageRing: View {
         }
         .frame(height: Layout.ringBlockHeight)
         .legibilityShadow(palette.textShadow)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+    }
+}
+
+/// Notch mode: a small ring with its value beside it, sized to fit the menu bar height.
+struct CompactRing: View {
+    let snapshot: ProviderSnapshot
+    let palette: Palette
+    let isRefreshing: Bool
+    var size: CGFloat
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            RingArc(snapshot: snapshot, palette: palette, isRefreshing: isRefreshing,
+                    size: size, lineWidth: 2.5, iconSize: size * 0.48)
+            Text(snapshot.ringLabel)
+                .font(.system(size: 11.5, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .foregroundColor(palette.fg)
+                .frame(width: Layout.compactLabelWidth, alignment: .leading)
+        }
+        .scaleEffect(hovering ? 1.06 : 1)
+        .animation(.spring(response: 0.28, dampingFraction: 0.55), value: hovering)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
     }
@@ -288,6 +389,76 @@ struct TabView: View {
     }
 }
 
+/// Notch mode: compact rings flank the notch; on hover the bar drops down into large rings.
+struct NotchBarView: View {
+    @ObservedObject var store: UsageStore
+    @ObservedObject var themeStore: ThemeStore
+    @ObservedObject var state: PanelState
+    var onRingHover: (String, CGFloat) -> Void   // id, ring centre x (window coords)
+    @State private var centers: [String: CGFloat] = [:]
+
+    // Always black so the bar reads as part of the physical notch.
+    private let palette = Palette.resolve(.black, systemDark: true)
+
+    private var visible: [ProviderSnapshot] { themeStore.visible(store.snapshots) }
+
+    var body: some View {
+        let compact = state.notchCollapsed, dropped = state.notchExpanded
+        let shape = state.isExpanded ? dropped : compact
+        let wings = Layout.splitWings(visible)
+        // GeometryReader pins content top-left; a bare ZStack would grow to the hidden ring row and get centred.
+        GeometryReader { _ in ZStack(alignment: .topLeading) {
+            NotchWingShape(radius: state.isExpanded ? Layout.droppedRadius : Layout.notchRadius)
+                .fill(Color.black)
+                .frame(width: shape.width, height: shape.height)
+                .offset(x: shape.minX - state.windowMinX)
+
+            HStack(spacing: 0) {
+                wing(wings.left)
+                Color.clear.frame(width: state.notchWidth)
+                wing(wings.right)
+            }
+            .frame(width: compact.width, height: state.barHeight)
+            .offset(x: compact.minX - state.windowMinX)
+            .opacity(state.isExpanded ? 0 : 1)
+
+            HStack(spacing: Layout.droppedGap) {
+                ForEach(visible) { snap in
+                    UsageRing(snapshot: snap, palette: palette,
+                              isRefreshing: store.refreshingIDs.contains(snap.id))
+                        .frame(width: Layout.droppedRingSlot)
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(key: RingCenterKey.self,
+                                                   value: [snap.id: geo.frame(in: .global).midX])
+                        })
+                        .onHover { inside in
+                            if inside, let x = centers[snap.id] { onRingHover(snap.id, x) }
+                        }
+                }
+            }
+            .frame(width: dropped.width)
+            .offset(x: dropped.minX - state.windowMinX, y: state.barHeight + 10)
+            .opacity(state.isExpanded ? 1 : 0)
+            .scaleEffect(state.isExpanded ? 1 : 0.85, anchor: .top)
+            .allowsHitTesting(state.isExpanded)
+        } }
+        .onPreferenceChange(RingCenterKey.self) { centers = $0 }
+        .animation(.timingCurve(0.32, 0.9, 0.35, 1, duration: 0.38), value: state.isExpanded)
+    }
+
+    private func wing(_ snaps: [ProviderSnapshot]) -> some View {
+        HStack(spacing: Layout.compactGap) {
+            ForEach(snaps) { snap in
+                CompactRing(snapshot: snap, palette: palette,
+                            isRefreshing: store.refreshingIDs.contains(snap.id),
+                            size: Layout.compactRingSize(barHeight: state.barHeight))
+            }
+        }
+        .padding(.horizontal, snaps.isEmpty ? 0 : Layout.wingPadding)
+        .frame(width: Layout.wingWidth(rings: snaps.count, barHeight: state.barHeight))
+    }
+}
+
 // MARK: - Settings menu (shared by the edge panel and the detail card)
 
 struct SettingsMenuItems: View {
@@ -328,6 +499,9 @@ struct SettingsMenuItems: View {
         }
         Picker(L("Appearance"), selection: $themeStore.theme) {
             ForEach(Theme.allCases) { Text($0.title).tag($0) }
+        }
+        Picker(L("Position"), selection: $themeStore.placement) {
+            ForEach(Placement.allCases) { Text($0.title).tag($0) }
         }
         Picker(L("Language"), selection: $themeStore.language) {
             Text(L("System default")).tag("")
@@ -418,6 +592,19 @@ struct PanelRootView: View {
     private var palette: Palette { Palette.resolve(themeStore.theme, systemDark: colorScheme == .dark) }
 
     var body: some View {
+        Group {
+            if themeStore.placement == .notch {
+                NotchBarView(store: store, themeStore: themeStore, state: state, onRingHover: onRingHover)
+            } else {
+                edgeBody
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover(perform: onHoverChanged)
+        .contextMenu { SettingsMenuItems(store: store, themeStore: themeStore) }
+    }
+
+    private var edgeBody: some View {
         ZStack(alignment: .trailing) {
             // Collapsed strip
             Surface(palette: palette, shape: LeftRoundedRect(radius: 6), tint: palette.stripTint)
@@ -434,9 +621,6 @@ struct PanelRootView: View {
                 .allowsHitTesting(state.isExpanded)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-        .contentShape(Rectangle())
-        .onHover(perform: onHoverChanged)
-        .contextMenu { SettingsMenuItems(store: store, themeStore: themeStore) }
         .animation(.timingCurve(0.32, 0.9, 0.35, 1, duration: 0.38), value: state.isExpanded)
         .forcedColorScheme(palette.colorScheme)
     }
@@ -448,6 +632,8 @@ struct PanelRootView: View {
 final class DetailState: ObservableObject {
     @Published var snapshot: ProviderSnapshot?
     @Published var tailY: CGFloat = 60     // relative to the card's top edge
+    @Published var tailX: CGFloat = 133    // relative to the card's left edge (tail on top)
+    @Published var tailOnTop = false       // notch mode: card hangs below the ring
     @Published var visible = false
 }
 
@@ -460,13 +646,16 @@ struct DetailBubbleView: View {
     private var palette: Palette { Palette.resolve(themeStore.theme, systemDark: colorScheme == .dark) }
 
     var body: some View {
+        let up = state.tailOnTop
         ZStack(alignment: .topLeading) {
             // Tail (behind the body so the overlap is hidden)
-            Surface(palette: palette, shape: ArrowTailShape())
-                .frame(width: Layout.tailWidth, height: Layout.tailHeight)
-                .offset(x: Layout.cardWidth - 1,
-                        y: state.tailY - Layout.tailHeight / 2)
+            Surface(palette: palette, shape: ArrowTailShape(up: up))
+                .frame(width: up ? Layout.tailHeight : Layout.tailWidth,
+                       height: up ? Layout.tailWidth : Layout.tailHeight)
+                .offset(x: up ? state.tailX - Layout.tailHeight / 2 : Layout.cardWidth - 1,
+                        y: up ? -(Layout.tailWidth - 1) : state.tailY - Layout.tailHeight / 2)
                 .animation(.timingCurve(0.30, 0.90, 0.25, 1, duration: 0.4), value: state.tailY)
+                .animation(.timingCurve(0.30, 0.90, 0.25, 1, duration: 0.4), value: state.tailX)
 
             // Body
             ZStack(alignment: .topLeading) {
@@ -483,10 +672,10 @@ struct DetailBubbleView: View {
                           shape: RoundedRectangle(cornerRadius: Layout.cardRadius, style: .continuous),
                           border: true)
         }
-        .padding(.trailing, Layout.tailRoom)
+        .padding(up ? .top : .trailing, Layout.tailRoom)
         .padding(Layout.shadowPad)
         .opacity(state.visible ? 1 : 0)
-        .offset(x: state.visible ? 0 : 14)
+        .offset(x: state.visible || up ? 0 : 14, y: state.visible || !up ? 0 : -10)
         .animation(.spring(response: 0.42, dampingFraction: 0.68), value: state.visible)
         .contentShape(Rectangle())
         .contextMenu { SettingsMenuItems(store: store, themeStore: themeStore) }
