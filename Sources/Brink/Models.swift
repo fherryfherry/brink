@@ -43,6 +43,15 @@ struct ProviderSnapshot: Identifiable {
     var updatedAt: Date?
 
     var primary: UsageWindow? { windows.first }
+
+    /// The window that actually gates new requests: full whenever any window is, else the most used one.
+    var effective: UsageWindow? {
+        let now = Date()
+        if let full = windows.first(where: { w in
+            !w.isBalance && w.usedPercent >= 99.5 && (w.resetsAt.map { $0 > now } ?? true)
+        }) { return full }
+        return windows.filter { !$0.isBalance }.max { $0.usedPercent < $1.usedPercent } ?? primary
+    }
 }
 
 // MARK: - Ring color scale

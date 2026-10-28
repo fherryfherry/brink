@@ -235,10 +235,10 @@ extension View {
 // MARK: - Usage ring
 
 extension ProviderSnapshot {
-    var ringPercent: Double { primary?.usedPercent ?? 0 }
+    var ringPercent: Double { effective?.usedPercent ?? 0 }
     var ringLabel: String {
         guard !windows.isEmpty else { return "--" }
-        return primary?.valueText ?? "\(Int(ringPercent.rounded()))%"
+        return effective?.valueText ?? "\(Int(ringPercent.rounded()))%"
     }
 }
 
@@ -262,8 +262,8 @@ struct RingArc: View {
     // separate loading element; the real percent arc reappears once it lands.
     private var arcEnd: Double {
         if isRefreshing { return 0.22 }
-        guard hasData, let primary = snapshot.primary else { return 0 }
-        return primary.isBalance ? 1 : primary.fraction
+        guard hasData, let shown = snapshot.effective else { return 0 }
+        return shown.isBalance ? 1 : shown.fraction
     }
 
     var body: some View {
