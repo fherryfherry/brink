@@ -28,7 +28,8 @@ struct UsageWindow: Identifiable {
             return m > 0 ? L("Resets in %d h %d min", h, m) : L("Resets in %d h", h)
         }
         let fmt = DateFormatter()
-        fmt.dateFormat = "EEE HH:mm"
+        // Past a week a weekday alone is ambiguous, so show the date instead.
+        if seconds < 7 * 86400 { fmt.dateFormat = "EEE HH:mm" } else { fmt.setLocalizedDateFormatFromTemplate("dMMM") }
         return L("Resets %@", fmt.string(from: resetsAt))
     }
 }
