@@ -8,8 +8,8 @@ final class SumopodProvider: UsageProvider {
 
     private static let balanceURL = URL(string: "https://api-gate-v2.sumopod.com/webhook/sumopod/ai/balance")!
     private static let sessionKey = "sumopod-auth"
-    // Google sign-in refuses embedded WKWebViews with the default user agent.
-    private static let userAgent =
+    // Google sign-in refuses embedded WKWebViews with the default user agent; shared with NusaRouter.
+    static let userAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
     init(id: String = "sumopod", displayName: String = "Sumopod AI") {

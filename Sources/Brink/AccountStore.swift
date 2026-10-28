@@ -1,7 +1,7 @@
 import Foundation
 
 enum AccountKind: String, Codable, CaseIterable {
-    case claude, codex, ollama, kenari, sumopod
+    case claude, codex, ollama, kenari, sumopod, nusarouter
 
     var label: String {
         switch self {
@@ -10,6 +10,7 @@ enum AccountKind: String, Codable, CaseIterable {
         case .ollama: return "Ollama"
         case .kenari: return "Kenari"
         case .sumopod: return "Sumopod AI"
+        case .nusarouter: return "NusaRouter"
         }
     }
 }
@@ -36,6 +37,8 @@ struct AccountConfig: Codable, Identifiable, Equatable {
             return KenariProvider(id: id, displayName: displayName)
         case .sumopod:
             return SumopodProvider(id: id, displayName: displayName)
+        case .nusarouter:
+            return NusaRouterProvider(id: id, displayName: displayName)
         }
     }
 }
@@ -100,7 +103,7 @@ final class AccountStore: ObservableObject {
             break // Codex reads Codex CLI's own auth.json; Brink caches nothing for it.
         case .sumopod:
             UserDefaults.standard.removeObject(forKey: "sumopodLoginHint-\(account.id)")
-        case .ollama, .kenari:
+        case .ollama, .kenari, .nusarouter:
             break // WebLogin reads live from WKWebsiteDataStore now; nothing on disk to remove.
         }
     }

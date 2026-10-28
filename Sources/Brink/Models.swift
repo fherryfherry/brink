@@ -9,7 +9,8 @@ struct UsageWindow: Identifiable {
     var label: String            // "Current session", "All models (weekly)"...
     var usedPercent: Double      // 0...100
     var resetsAt: Date?
-    var valueText: String? = nil // shown instead of a percent for non-quota windows, e.g. a "$2.99" balance
+    var valueText: String? = nil // legacy: this window is a money balance, label replaced by the value
+    var detail: String? = nil    // shown on the right instead of reset text, e.g. a "$0.11" balance
 
     var isBalance: Bool { valueText != nil }
     var fraction: Double { min(max(usedPercent / 100.0, 0), 1) }
@@ -111,6 +112,7 @@ final class UsageStore: ObservableObject {
         case let p as OllamaProvider: return p.login
         case let p as KenariProvider: return p.login
         case let p as SumopodProvider: return p.login
+        case let p as NusaRouterProvider: return p.login
         default: return nil
         }
     }

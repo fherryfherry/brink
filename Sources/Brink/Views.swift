@@ -174,7 +174,7 @@ struct ProviderIcon: View {
 
     private static let logos: [String: NSImage] = {
         var dict: [String: NSImage] = [:]
-        for (key, file) in [("claude", "claude"), ("codex", "openai"), ("ollama", "ollama"), ("kenari", "kenari")] {
+        for (key, file) in [("claude", "claude"), ("codex", "openai"), ("ollama", "ollama"), ("kenari", "kenari"), ("nusarouter", "nusarouter")] {
             if let url = Bundle.module.url(forResource: file, withExtension: "png"),
                let img = NSImage(contentsOf: url) {
                 img.isTemplate = true
@@ -263,7 +263,7 @@ struct RingArc: View {
     private var arcEnd: Double {
         if isRefreshing { return 0.22 }
         guard hasData, let shown = snapshot.effective else { return 0 }
-        return shown.isBalance ? 1 : shown.fraction
+        return shown.isBalance && shown.detail == nil ? 1 : shown.fraction
     }
 
     var body: some View {
@@ -478,7 +478,7 @@ struct SettingsMenuItems: View {
             }
         }
         Menu(L("Accounts")) {
-            ForEach(accountStore.accounts.filter { [.ollama, .kenari, .sumopod].contains($0.kind) }) { account in
+            ForEach(accountStore.accounts.filter { [.ollama, .kenari, .sumopod, .nusarouter].contains($0.kind) }) { account in
                 Button(L("Sign in to %@", account.displayName)) {
                     store.webLogin(for: account.id)?.presentLogin { store.refreshAll() }
                 }
@@ -490,6 +490,7 @@ struct SettingsMenuItems: View {
                 Button(L("Ollama…")) { addOllama() }
                 Button(L("Kenari…")) { addKenari() }
                 Button(L("Sumopod AI…")) { addSumopod() }
+                Button(L("NusaRouter…")) { addNusaRouter() }
             }
             Menu(L("Remove account")) {
                 ForEach(accountStore.accounts) { account in
@@ -569,6 +570,15 @@ struct SettingsMenuItems: View {
             placeholder: "Sumopod AI"
         ) else { return }
         let config = accountStore.add(kind: .sumopod, displayName: name, configDir: nil)
+        store.webLogin(for: config.id)?.presentLogin { store.refreshAll() }
+    }
+
+    private func addNusaRouter() {
+        guard let name = AccountPrompt.text(
+            title: L("Add NusaRouter account"), message: L("A display name for this account."),
+            placeholder: "NusaRouter"
+        ) else { return }
+        let config = accountStore.add(kind: .nusarouter, displayName: name, configDir: nil)
         store.webLogin(for: config.id)?.presentLogin { store.refreshAll() }
     }
 
@@ -728,7 +738,12 @@ struct DetailCardContent: View {
                                 .font(.system(size: 11.5, weight: .medium))
                                 .foregroundColor(palette.fg)
                             Spacer()
-                            if let reset = window.resetText {
+                            if let detail = window.detail {
+                                Text(detail)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .monospacedDigit()
+                                    .foregroundColor(palette.fg)
+                            } else if let reset = window.resetText {
                                 Text(reset)
                                     .font(.system(size: 10.5))
                                     .foregroundColor(palette.muted)
